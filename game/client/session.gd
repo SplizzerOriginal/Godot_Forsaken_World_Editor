@@ -181,6 +181,37 @@ func skill_cast(id: int, target: int, pos = null) -> Dictionary:
 func skill_cancel() -> Dictionary:
 	return await net.request("skill_cancel", {})
 
+# Testbefehl: Effekt anlegen (nur Server mit debug_commands); target 0 = die eigene Figur
+func debug_state(state: int, target: int = 0, time: int = 5000, values: Array = []) -> Dictionary:
+	return await net.request("debug_state", {"state": state, "target": target, "time": time, "values": values})
+
+# Nächste Stufe einer Klassen-Fertigkeit lernen (gegen Gold; F8)
+# Lernen gegen Seelenmünzen; gold = true: fehlende Seelenmünzen mit Gold ausgleichen (nach Rückfrage, Z4)
+func skill_learn(id: int, gold: bool = false) -> Dictionary:
+	return await net.request("skill_learn", {"id": id, "gold": gold})
+
+# Test: Stufe und Geld der Figur setzen (nur Testserver mit debug_commands)
+# Gegenstand der Tasche benutzen (Quest-Würfel, Z5) -> {pos, id, time}; Ende: Meldung use_end
+func item_use(pos: int) -> Dictionary:
+	return await net.request("item_use", {"pos": pos})
+
+func item_destroy(pos: int, id: int) -> Dictionary:
+	return await net.request("item_destroy", {"pos": pos, "id": id})
+
+func debug_char(level: int, money: int, bind_money: int = -1) -> Dictionary:
+	var args = {"level": level, "money": money}
+	if bind_money >= 0:
+		args["bind_money"] = bind_money
+	return await net.request("debug_char", args)
+
+# Test: Fertigkeit lernen / Stufe setzen (nur Testserver mit debug_commands)
+# Ort eines Quest-Ziels (Z3): kind "mon" (Monster-Vorlage) / "item" (Gegenstand der laufenden Quest quest)
+func quest_where(kind: String, id: int, quest: int = 0) -> Dictionary:
+	return await net.request("quest_where", {"kind": kind, "id": id, "quest": quest})
+
+func debug_skill(id: int, level: int = 1) -> Dictionary:
+	return await net.request("debug_skill", {"id": id, "level": level})
+
 func say(text: String, channel: int = Proto.CHAT_SAY) -> Dictionary:
 	return await net.request("chat", {"channel": channel, "text": text})
 

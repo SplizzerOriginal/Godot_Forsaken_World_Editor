@@ -17,7 +17,8 @@ extends RefCounted
 #   (0, 3) längere Restzeit ersetzt.
 #   Beginn: begin[0] 1 = sofort, 2 = nach begin_param[0] ms; andere Auslöser (Treffer, Zustand ...) noch nicht.
 # Ende: Zeit abgelaufen, Tod (end[6] leer = OVER_DEATH), Kampf (end[4] "true" = OVER_COMBAT), Monster zurück am
-#   Geburtsort, Figur verlässt die Welt (Effekte werden noch nicht gespeichert).
+#   Geburtsort, Figur verlässt die Welt - Effekte mit offline_save bleiben (store / restore, Tabelle buffs; Restzeit
+#   bleibt stehen, mit offline_timing läuft sie weiter).
 # Wirkungen (Werte der Arten mit "正负属性" im Editor: Parameter 0 = abziehen, EffectStub FLAG_SIGNED):
 #   Werte (MODS, je Stapel): Schaden / Abwehr / Treffer / Ausweichen fest und in Promille (adjust*), Krit /
 #     Krit-Schaden / Krit-Abwehr (Bruchteil -> %), Höchst-Leben / -Mana fest und in Promille, Tempo (m/s),
@@ -25,8 +26,19 @@ extends RefCounted
 #   über Zeit (alle param ms, Takt je Effekt ab dem Anlegen): decHp2Death / decHp (bis 1 HP) Schaden * Stapel,
 #     persistHeal, incMp, decMp * Stapel
 #   sofort: heal, subHp, subHpNotDeath, addMp, subMp
-#   übrige (Kontrolle stun / stop / silent / melee -> F5, genState / clearFilter ... -> F10): Effekt liegt und
-#     zählt, wirkt aber noch nicht (einmal im Log)
+#   Kontrolle (F5) wie active_seal: Siegel als Zähler aus den aktiven Effekten (seal: root, silent, melee, idle, diet,
+#     disarm, invincible); stun = idle + root + silent + melee, stop = root, silent, melee, diet, disArm, invincible;
+#     immune legt seine Klassen-Maske (param) zur Immunität (buff_immune). Wechsel -> Meldung seal an den Spieler,
+#     neu schweigend / betäubt bricht das Zaubern ab, neu ohne Normalangriff endet er, Monster bleiben bei root / idle
+#     stehen (combat.gd / npcs.gd prüfen die Siegel). Sofort: break (Zaubern unterbrechen mit der Chance break der
+#     laufenden Prozedur), repel (Rückstoß um den Wert in m), taunt / assault (Monster greift den Zaubernden an),
+#     dispel / dispelOnce (Effekte, deren Klasse bag in der Maske param liegt: alle bzw. den zuletzt angelegten),
+#     clearFilter (Effekt mit der ID = Wert), gohome (Stadtportal: combat.gd return_to_town). invincible: kein
+#     Schaden, keine schädlichen Effekte.
+#   übrige (genState, clearCoolDown ... -> F10): Effekt liegt und zählt, wirkt aber noch nicht (einmal im Log)
+# Passive Fertigkeiten / Schalter (F7): apply(..., extra) markiert Effekte mit passive (Dauer-Effekt einer passiven
+#   Fertigkeit: nicht bannbar, bleibt über den Tod) bzw. switch (Schalter: an, solange einer seiner Effekte liegt;
+#   Meldung skill_switch {id, on}); switch_off / remove_passive entfernen sie.
 # Meldungen: buffs {id, list} an alle in Sicht des Trägers (auch an ihn selbst), list = [[Effekt, Stapel,
 #   Rest ms (0 = ohne Ende), Dauer ms, Sichtbar-Index light (GFX am Modell, -1 = keiner)]]; beim Erscheinen in Sicht
 #   schickt world.gd die Liste ebenso (Träger mit Effekten); hit {src, dst, dmg, buff, hp, max_hp} für Schaden über Zeit,
@@ -40,11 +52,27 @@ const MODS = {"modifyPhyDamage": "dmg", "adjustPhyDamage": "dmg%", "modifyPhyDef
 	"modifyAttack": "hit", "adjustAttack": "hit%", "modifyArmor": "eva", "adjustArmor": "eva%", "modifyPhyCrit": "crit",
 	"modifyPhyCritDmg": "crit_dmg", "modifyImpairCritRate": "anti_crit", "modifyImpairCritDmg": "anti_crit_dmg",
 	"modifyMaxHp": "max_hp", "adjustHp": "max_hp%", "modifyMaxMp": "max_mp", "adjustMp": "max_mp%", "modifySpeed": "speed",
-	"adjustHpgen": "hp_gen%", "adjustMpgen": "mp_gen%", "adjustHeal": "heal%"}
+	"adjustHpgen": "hp_gen%", "adjustMpgen": "mp_gen%", "adjustHeal": "heal%",
+	# Widerstände und Meisterschaften 0 - 7 (physisch, Erde, Wasser, Feuer, Wind, Licht, Dunkel, ohne Element; "alle" wirkt
+	# auf 0 - 7 wie ModifyAllMastery / ModifyAllResistance): Anzeige im C-Fenster, im Kampf noch ohne Wirkung (F10)
+	"modifyResistance0": "res0", "modifyResistance7": "res7", "modifyMastery7": "mastery7",
+	"modifyResistance1": "res1", "modifyResistance2": "res2", "modifyResistance3": "res3", "modifyResistance4": "res4",
+	"modifyResistance5": "res5", "modifyResistance6": "res6", "modifyAllResistance": "res_all",
+	"modifyMastery0": "mastery0", "modifyMastery1": "mastery1", "modifyMastery2": "mastery2", "modifyMastery3": "mastery3",
+	"modifyMastery4": "mastery4", "modifyMastery5": "mastery5", "modifyMastery6": "mastery6", "modifyAllMastery": "mastery_all",
+	# Schaden absorbieren (Bruchteil des erlittenen Schadens, z.B. Segen der Steinmenschen 1 %; combat.gd damage)
+	"absorbDamage": "absorb"}
+# Wirkungen ohne Wirkung hier, aber bekannt (keine Meldung "noch nicht umgesetzt"): Tempo auf dem Reittier / beim Fliegen
+# (gibt es noch nicht), empty (nur das GFX light des Effekts, z.B. 1268 Vitalität)
+const KNOWN_NOOP = ["modifyMountSpeed", "enhanceFlySpeed", "empty"]
 const TO_PERCENT = ["crit", "crit_dmg", "anti_crit", "anti_crit_dmg"] # Bruchteil -> % wie die Kampfwerte
 const PERMILLE = ["dmg%", "def%", "hit%", "eva%", "max_hp%", "max_mp%", "hp_gen%", "mp_gen%", "heal%"] # Wert * 1000
 const PERIODIC = ["decHp2Death", "decHp", "persistHeal", "incMp", "decMp"]
-const INSTANT = ["heal", "subHp", "subHpNotDeath", "addMp", "subMp"]
+const INSTANT = ["heal", "subHp", "subHpNotDeath", "addMp", "subMp", # dazu die Kontrolle (F5):
+	"break", "repel", "taunt", "assault", "dispel", "dispelOnce", "clearFilter", "gohome"]
+const SEALS = {"stun": ["idle", "root", "silent", "melee"], "stop": ["root"], "silent": ["silent"], "melee": ["melee"],
+	"diet": ["diet"], "disArm": ["disarm"], "invincible": ["invincible"]}
+const SEAL_KEYS = ["root", "silent", "melee", "idle", "diet", "disarm", "invincible"]
 const MIN_TIME = 500 # ms
 const COMBAT_TIME = 10.0 # s wie combat.gd
 
@@ -52,7 +80,9 @@ var world # world.gd
 var net
 var log_line: Callable
 var combat # combat.gd: Tod, Belohnung
+var casting = null # skill_cast.gd: Unterbrechen, Abbruch bei Schweigen / Betäuben
 var stats_push: Callable # (peer, p)
+var on_gain: Callable # (peer, p) ein Spieler hat einen neuen Effekt (quests.gd auto_deliver)
 var states = {} # ID -> Effekt
 var kinds = {} # hs -> {name, signed}
 var clock: Callable # Tests: eigene Uhr (ms), sonst Time.get_ticks_msec
@@ -85,13 +115,15 @@ func load_templates() -> String:
 # ====================================================
 # Effekt state_id auf obj (Spieler oder Monster der Map map_name); values = Werte der Wirkungen, src = Zaubernder
 # (Spieler-Dictionary), crit = der Treffer war kritisch -> angelegt?
-func apply(obj: Dictionary, map_name: String, state_id: int, values: Array, time_ms: int, chance: int, src: Dictionary, crit: bool = false) -> bool:
+# extra: Markierungen für den Effekt (passive: Fertigkeit, deren Dauer-Effekt er ist; switch: Schalter-Fertigkeit, F7)
+func apply(obj: Dictionary, map_name: String, state_id: int, values: Array, time_ms: int, chance: int, src: Dictionary, crit: bool = false,
+		extra: Dictionary = {}) -> bool:
 	var st: Dictionary = states.get(state_id, {})
 	if st.is_empty() or int(obj.get("hp", 0)) <= 0:
 		return false
 	var now = _now()
 	var player = _is_player(obj)
-	if int(obj.get("immune", 0)) & int(st["bag"]) != 0:
+	if (int(obj.get("immune", 0)) | int(obj.get("buff_immune", 0))) & int(st["bag"]) != 0:
 		return false
 	var level = int(obj.get("level", 1))
 	if (int(st["min_level"]) > 0 and level < int(st["min_level"])) or (int(st["max_level"]) > 0 and level > int(st["max_level"])):
@@ -187,6 +219,7 @@ func apply(obj: Dictionary, map_name: String, state_id: int, values: Array, time
 							if e["name"] in INSTANT:
 								_instant(obj, old, e)
 					_restart(old, t, time_type, now)
+					old.merge(extra) # z.B. ein Schalter frischt seinen Effekt auf: er hält ihn an
 					_changed(obj)
 					return true
 				else:
@@ -195,6 +228,7 @@ func apply(obj: Dictionary, map_name: String, state_id: int, values: Array, time
 				if t <= left:
 					return false
 				_restart(old, t, time_type, now)
+				old.merge(extra)
 				_changed(obj)
 				return true
 			8:
@@ -213,6 +247,7 @@ func apply(obj: Dictionary, map_name: String, state_id: int, values: Array, time
 				if int(old["end"]) > 0:
 					old["end"] = int(old["end"]) + t
 					old["time"] = int(old["end"]) - int(old["start"])
+				old.merge(extra)
 				_changed(obj)
 				return true
 			_:
@@ -220,8 +255,9 @@ func apply(obj: Dictionary, map_name: String, state_id: int, values: Array, time
 					return false
 				_remove(obj, old)
 	var b = {"id": state_id, "src": src_id, "stack": 1, "start": now, "time": t, "end": now + t if time_type == 1 else 0,
-		"next": now + 1000, "active": false, "first": first, "effects": effects, "map": map_name,
+		"next": now + 1000, "active": false, "first": first, "effects": effects, "map": map_name, "values": values.duplicate(),
 		"death_end": str(st["end"][6]) == "", "combat_end": str(st["end"][4]) == "true"}
+	b.merge(extra)
 	match str(st["begin"][0]):
 		"1":
 			pass
@@ -231,6 +267,10 @@ func apply(obj: Dictionary, map_name: String, state_id: int, values: Array, time
 			b["dormant"] = true # andere Auslöser noch nicht umgesetzt
 	list.append(b)
 	obj["buffs"] = list
+	if player and on_gain.is_valid():
+		var peer = _peer_of(obj)
+		if peer >= 0:
+			on_gain.call(peer, obj) # quests.gd auto_deliver: Quests mit Effekt-Bedingung (z.B. 6967, Effekt 914)
 	obj["buff_map"] = map_name
 	_holders[_key(obj)] = [obj, map_name]
 	if not b.has("delay_until") and not b.has("dormant"):
@@ -252,12 +292,12 @@ func _activate(obj: Dictionary, b: Dictionary) -> void:
 # Wirkung einmal anwenden (TakeEffect)
 func _take(obj: Dictionary, b: Dictionary, e: Dictionary) -> void:
 	var n: String = e["name"]
-	if MODS.has(n):
+	if MODS.has(n) or SEALS.has(n) or n == "immune":
 		e["times"] = int(e["times"]) + 1
 		_recalc(obj)
 	elif n in INSTANT:
 		_instant(obj, b, e)
-	elif not n in PERIODIC:
+	elif not n in PERIODIC and not n in KNOWN_NOOP:
 		_note(e)
 
 func _note(e: Dictionary) -> void:
@@ -296,10 +336,72 @@ func clear(obj: Dictionary) -> void:
 		_remove(obj, b)
 	_changed(obj)
 
+# ====================================================
+# SPEICHERN (offline_save, Tabelle buffs)
+# ====================================================
+# Effekte des Spielers mit offline_save speichern (beim Verlassen der Welt und mit jedem Speichern der Figur);
+# Dauer-Effekte passiver Fertigkeiten und Schalter-Effekte nicht (kommen beim Betreten neu bzw. enden)
+func store(p: Dictionary) -> void:
+	var db = world.get("db") if world != null else null
+	if db == null or not _is_player(p) or not p.has("id"):
+		return
+	var now = _now()
+	var unix = int(Time.get_unix_time_from_system())
+	db.run("DELETE FROM buffs WHERE character_id = ?", [p["id"]])
+	var slot = 0
+	for b in p.get("buffs", []):
+		var st: Dictionary = states.get(int(b["id"]), {})
+		if int(st.get("offline_save", 0)) != 1 or b.has("passive") or b.has("switch"):
+			continue
+		var left = int(b["end"]) - now if int(b["end"]) > 0 else -1
+		if left != -1 and left < MIN_TIME:
+			continue
+		if not db.run("INSERT INTO buffs (character_id, slot, state_id, src, stack, left_ms, time_ms, vals, saved) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				[p["id"], slot, int(b["id"]), int(b["src"]), int(b["stack"]), left, int(b["time"]), JSON.stringify(b.get("values", [])), unix]):
+			log_line.call("FEHLER Datenbank: " + db.last_error)
+		slot += 1
+
+# Gespeicherte Effekte beim Betreten der Welt wieder anlegen (Restzeit wie beim Abmelden; mit offline_timing abzüglich
+# der abgemeldeten Zeit) -> Anzahl
+func restore(peer: int, p: Dictionary) -> int:
+	var db = world.get("db") if world != null else null
+	if db == null:
+		return 0
+	var rows = db.query("SELECT state_id, src, stack, left_ms, time_ms, vals, saved FROM buffs WHERE character_id = ? ORDER BY slot", [p["id"]])
+	var unix = int(Time.get_unix_time_from_system())
+	var n = 0
+	for r in (rows if rows != null else []):
+		var id = int(r["state_id"])
+		var st: Dictionary = states.get(id, {})
+		if st.is_empty():
+			continue
+		var left = int(r["left_ms"])
+		if left > 0 and int(st.get("offline_timing", 0)) == 1:
+			left -= (unix - int(r["saved"])) * 1000
+			if left < MIN_TIME:
+				continue
+		var vals = JSON.parse_string(str(r["vals"]))
+		var src = {"id": int(r["src"])}
+		var ok = false
+		for i in maxi(1, int(r["stack"])): # Stapel: gleich oft anlegen (Regel 6 stapelt gleiche Werte)
+			ok = apply(p, str(p.get("map", "")), id, vals if vals is Array else [], left if left > 0 else int(r["time_ms"]), 100, src) or ok
+		for b in p.get("buffs", []):
+			if int(b["id"]) == id and int(b["src"]) == int(r["src"]):
+				b["time"] = maxi(int(r["time_ms"]), int(b["time"])) # Gesamtdauer für die Anzeige
+		if ok:
+			n += 1
+	if n > 0:
+		_changed(p)
+		log_line.call("Statuseffekte: %s bekommt %d gespeicherte Effekte zurück" % [p.get("name", "?"), n])
+	return n
+
 # Träger verlässt die Welt / verschwindet: nur vergessen (keine Meldung)
 func forget(obj: Dictionary) -> void:
 	obj["buffs"] = []
+	obj["switch_on"] = []
 	obj["buff_mod"] = {}
+	obj["seal"] = {}
+	obj["buff_immune"] = 0
 	_holders.erase(_key(obj))
 
 func list_of(obj: Dictionary) -> Array:
@@ -374,6 +476,21 @@ func _instant(obj: Dictionary, b: Dictionary, e: Dictionary) -> void:
 			_mana(obj, int(v))
 		"subMp":
 			_mana(obj, -int(v))
+		"break":
+			if casting != null and _is_player(obj) and obj.has("cast"):
+				casting.interrupt(_peer_of(obj), obj)
+		"repel":
+			_repel(obj, b, v)
+		"taunt", "assault":
+			_provoke(obj, b)
+		"dispel", "dispelOnce":
+			_dispel(obj, b, func(x): return int(states.get(int(x["id"]), {}).get("bag", 0)) & int(e["param"]) != 0,
+				e["name"] == "dispelOnce")
+		"clearFilter":
+			_dispel(obj, b, func(x): return int(x["id"]) == int(v), false)
+		"gohome": # Stadtportal (ReturnToTown)
+			if combat != null and _is_player(obj):
+				combat.return_to_town(obj)
 
 
 # ====================================================
@@ -381,6 +498,8 @@ func _instant(obj: Dictionary, b: Dictionary, e: Dictionary) -> void:
 # ====================================================
 # Schaden aus einem Effekt (BeHurt): Meldung hit mit buff, Aggro, Tod mit Belohnung für den Zaubernden
 func _hurt(obj: Dictionary, b: Dictionary, amount: int, can_kill: bool) -> void:
+	if sealed(obj, "invincible"):
+		return
 	var hp = int(obj.get("hp", 0))
 	if not can_kill:
 		amount = mini(amount, hp - 1)
@@ -412,7 +531,9 @@ func _heal(obj: Dictionary, b: Dictionary, amount: int) -> void:
 	if amount < 1 or hp <= 0:
 		return
 	obj["hp"] = mini(int(obj["max_hp"]), hp + amount)
-	_to_viewers(obj, b["map"], "heal", {"src": b["src"], "dst": obj["id"], "amount": int(obj["hp"]) - hp, "buff": b["id"],
+	# amount = ganzer Heilbetrag, auch wenn das Leben schon voll ist (wie im Spiel: Wirkung von Ausrüstung und
+	# Fertigkeiten bleibt außerhalb des Kampfes sichtbar)
+	_to_viewers(obj, b["map"], "heal", {"src": b["src"], "dst": obj["id"], "amount": amount, "buff": b["id"],
 		"hp": obj["hp"], "max_hp": obj["max_hp"]})
 	if _is_player(obj):
 		_push_stats(obj)
@@ -443,8 +564,8 @@ func _recalc(obj: Dictionary) -> void:
 			elif key in PERMILLE:
 				v *= 1000.0
 			m[key] = float(m.get(key, 0.0)) + v
+	var changed = m != obj.get("buff_mod", {}) # andere Werte (C-Fenster: Meisterschaft, Genauigkeit ...) -> stats
 	obj["buff_mod"] = m
-	var changed = false
 	for k in ["hp", "mp"]:
 		var base = int(obj.get("max_" + k, 0)) - int(obj.get("buff_" + k, 0))
 		var add = int(float(m.get("max_" + k, 0.0)) + base * float(m.get("max_%s%%" % k, 0.0)) / 1000.0)
@@ -459,6 +580,11 @@ func _recalc(obj: Dictionary) -> void:
 		changed = true
 	if changed and _is_player(obj):
 		_push_stats(obj)
+	_recalc_seals(obj)
+
+# Werte neu berechnen (Grundwerte geändert, z.B. Stufenaufstieg: Prozent-Effekte vom neuen Höchst-Leben)
+func refresh(obj: Dictionary) -> void:
+	_recalc(obj)
 
 static func mods_of(obj: Dictionary) -> Dictionary:
 	return obj.get("buff_mod", {})
@@ -476,7 +602,111 @@ static func with_mods(props: Dictionary, obj: Dictionary) -> Dictionary:
 		out[k] = maxf(0.0, (float(props.get(k, 0)) + float(m.get(k, 0.0))) * (1.0 + float(m.get(k + "%", 0.0)) / 1000.0))
 	for k in TO_PERCENT:
 		out[k] = float(props.get(k, 0)) + float(m.get(k, 0.0))
+	out["absorb"] = float(props.get("absorb", 0.0)) + float(m.get("absorb", 0.0))
 	return out
+
+
+# ====================================================
+# KONTROLLE (F5)
+# ====================================================
+# Siegel aus den aktiven Effekten (Zähler je Siegel wie active_seal), Immunität als Maske; Wechsel -> _seal_changed
+func _recalc_seals(obj: Dictionary) -> void:
+	var s = {}
+	var immune = 0
+	for b in obj.get("buffs", []):
+		if not b.get("active", false):
+			continue
+		for e in b["effects"]:
+			for k in SEALS.get(e["name"], []):
+				s[k] = int(s.get(k, 0)) + 1
+			if e["name"] == "immune":
+				immune |= int(e["param"])
+	obj["buff_immune"] = immune
+	var old: Dictionary = obj.get("seal", {})
+	obj["seal"] = s
+	var gained = []
+	var changed = false
+	for k in SEAL_KEYS:
+		var on = int(s.get(k, 0)) > 0
+		if on != (int(old.get(k, 0)) > 0):
+			changed = true
+			if on:
+				gained.append(k)
+	if changed:
+		_seal_changed(obj, gained)
+
+# Spieler: Meldung seal; neu schweigend / betäubt -> Zaubern bricht ab (OnSilent / OnIdle), neu ohne Normalangriff ->
+# er endet (OnUnarm). Monster bleiben bei root / idle stehen (OnRoot: npc_move zum eigenen Ort)
+func _seal_changed(obj: Dictionary, gained: Array) -> void:
+	var s = seals_of(obj)
+	if _is_player(obj):
+		var peer = _peer_of(obj)
+		if peer >= 0:
+			net.push(peer, "seal", s)
+		if "silent" in gained and casting != null and obj.has("cast"):
+			casting.cancel(peer, obj, true, "Siegel")
+		if "melee" in gained and combat != null:
+			combat.stop(obj)
+	elif ("root" in gained or "idle" in gained) and obj.get("to") != null:
+		obj["to"] = null
+		var nm = world.npc_maps.get(str(obj.get("buff_map", ""))) if world != null else null
+		if nm != null:
+			nm.moves.append(obj["id"])
+	var on = SEAL_KEYS.filter(func(k): return s[k])
+	log_line.call("Statuseffekte: %s %s" % [obj.get("name", obj["id"]), "Siegel " + ", ".join(on) if not on.is_empty() else "ohne Siegel"])
+
+# {root, silent, melee, idle, diet, disarm, invincible} -> bool (Meldung seal)
+static func seals_of(obj: Dictionary) -> Dictionary:
+	var out = {}
+	for k in SEAL_KEYS:
+		out[k] = sealed(obj, k)
+	return out
+
+static func sealed(obj: Dictionary, what: String) -> bool:
+	return int(obj.get("seal", {}).get(what, 0)) > 0
+
+# Rückstoß um meters vom Zaubernden weg (KnockBack): Spieler -> pos_correct, Monster gleiten in 0,3 s dorthin
+func _repel(obj: Dictionary, b: Dictionary, meters: float) -> void:
+	var src = _player_by_id(int(b["src"]))
+	if src == null or meters <= 0.0 or sealed(obj, "invincible"):
+		return
+	var away = Vector2(obj["pos"].x - src["pos"].x, obj["pos"].z - src["pos"].z)
+	away = (away.normalized() if away.length() > 0.01 else Vector2(0, 1)) * meters
+	var to: Vector3 = obj["pos"] + Vector3(away.x, 0.0, away.y)
+	if _is_player(obj):
+		obj["pos"] = to
+		obj["t"] = _now()
+		var peer = _peer_of(obj)
+		if peer >= 0:
+			net.push(peer, "pos_correct", {"pos": [to.x, to.y, to.z], "dir": obj.get("dir", 0.0)})
+		return
+	var nm = world.npc_maps.get(str(obj.get("buff_map", ""))) if world != null else null
+	if nm == null:
+		return
+	if nm.terrain != null:
+		to.y = nm.terrain.height(to.x, to.z) + (obj["pos"].y - nm.terrain.height(obj["pos"].x, obj["pos"].z))
+	obj["to"] = to
+	obj["speed"] = meters / 0.3
+	nm.moves.append(obj["id"])
+
+# Spott (BeTaunted / BeDefied): das Monster greift den Zaubernden an
+func _provoke(obj: Dictionary, b: Dictionary) -> void:
+	if _is_player(obj) or _player_by_id(int(b["src"])) == null:
+		return
+	obj["target"] = int(b["src"])
+	obj["fight"] = true
+	obj["last_hit"] = _now() / 1000.0
+	if not sealed(obj, "root"):
+		obj["to"] = null
+
+# Effekte entfernen (Bannen): alle, auf die match passt, bzw. nur den zuletzt angelegten; nie den bannenden selbst
+func _dispel(obj: Dictionary, b: Dictionary, match_fn: Callable, last_only: bool) -> void:
+	var hit = obj.get("buffs", []).filter(func(x): return x != b and not x.has("passive") and match_fn.call(x))
+	if hit.is_empty():
+		return
+	for x in ([hit[-1]] if last_only else hit):
+		_remove(obj, x)
+	_changed(obj)
 
 
 # ====================================================
@@ -484,6 +714,58 @@ static func with_mods(props: Dictionary, obj: Dictionary) -> Dictionary:
 # ====================================================
 func _changed(obj: Dictionary) -> void:
 	_to_viewers(obj, str(obj.get("buff_map", obj.get("map", ""))), "buffs", {"id": obj["id"], "list": list_of(obj)})
+	_switch_sync(obj)
+
+
+# ====================================================
+# PASSIVE FERTIGKEITEN UND SCHALTER (F7, SkillWrapper SwitchOn / SwitchOff / TrySwitchOff)
+# ====================================================
+# Ein Schalter ist an, solange mindestens ein Effekt mit seiner Markierung switch auf der Figur liegt (der erste
+# meldet skill_switch {id, on: true}, das Ende des letzten - abgelaufen, gebannt, Tod - on: false)
+func switched(obj: Dictionary) -> Array:
+	var out = []
+	for b in obj.get("buffs", []):
+		if b.has("switch") and not int(b["switch"]) in out:
+			out.append(int(b["switch"]))
+	return out
+
+func is_switched(obj: Dictionary, skill_id: int) -> bool:
+	return obj.get("buffs", []).any(func(b): return int(b.get("switch", 0)) == skill_id)
+
+# Schalter aus: alle seine Effekte entfernen (TrySwitchOff)
+func switch_off(obj: Dictionary, skill_id: int) -> void:
+	var gone = obj.get("buffs", []).filter(func(b): return int(b.get("switch", 0)) == skill_id)
+	for b in gone:
+		_remove(obj, b)
+	if not gone.is_empty():
+		_changed(obj)
+
+# Dauer-Effekte einer passiven Fertigkeit entfernen (neue Stufe: UndoEffect, dann TakeEffect) -> Anzahl
+func remove_passive(obj: Dictionary, skill_id: int, notify: bool = true) -> int:
+	var gone = obj.get("buffs", []).filter(func(b): return int(b.get("passive", 0)) == skill_id)
+	for b in gone:
+		_remove(obj, b)
+	if notify and not gone.is_empty():
+		_changed(obj)
+	return gone.size()
+
+func _switch_sync(obj: Dictionary) -> void:
+	if not _is_player(obj):
+		return
+	var now_on = switched(obj)
+	var was: Array = obj.get("switch_on", [])
+	if now_on == was:
+		return
+	obj["switch_on"] = now_on
+	var peer = _peer_of(obj)
+	if peer < 0:
+		return
+	for id in now_on:
+		if not id in was:
+			net.push(peer, "skill_switch", {"id": id, "on": true})
+	for id in was:
+		if not id in now_on:
+			net.push(peer, "skill_switch", {"id": id, "on": false})
 
 func _to_viewers(obj: Dictionary, map_name: String, what: String, data: Dictionary) -> void:
 	if world == null:
@@ -501,6 +783,14 @@ func _push_stats(p: Dictionary) -> void:
 		if world.players[peer] == p:
 			stats_push.call(peer, p)
 			return
+
+func _peer_of(p: Dictionary) -> int:
+	if world == null:
+		return -1
+	for peer in world.players:
+		if world.players[peer] == p:
+			return peer
+	return -1
 
 func _player_by_id(id: int):
 	if world == null:

@@ -77,6 +77,51 @@ extends RefCounted
 #   Monsters in Sicht geändert, auch an die Figur selbst; beim Erscheinen in Sicht mit Effekten ebenso), heal {src,
 #   dst, amount, buff, hp, max_hp} (Heilung durch einen Effekt), hit mit buff (Effekt-ID) = Schaden über Zeit; target
 #   und world_ready liefern buffs (Liste wie oben); stats enthält speed_add (m/s aus Tempo-Effekten)
+#   Kontrolle (F5): Meldung seal {root, silent, melee, idle, diet, disarm, invincible} (bool, nur an die Figur selbst)
+#   bei jeder Änderung ihrer Siegel: root = keine Bewegung (MOVE wird zurückgesetzt), silent = keine Fertigkeiten
+#   außer dizzy-fähigen (skill_info dizzy), melee = kein Normalangriff, idle = betäubt (alles davon), disarm = nur
+#   Fertigkeiten mit skill_info handfree; abgewiesen mit SKILL_SEALED / ATTACK_SEALED; hit mit immune = true:
+#   das Ziel ist unverwundbar (kein Schaden)
+#   Startfertigkeiten (F6): skill_cast target bei Stärkungen = ein Spieler in Sicht, sonst (0, Monster, eigene ID) die
+#   eigene Figur; skill_info enthält bless (Stärkung), self (nur auf sich, Zielart 5), move (1 = Ansturm); Meldung
+#   skill_move {id, pos, time} (Ansturm: die Figur läuft in time ms nach pos, an alle in Sicht und den Zaubernden);
+#   hit mit nodmg = Fluch ohne Schaden (nur Treffer); das Stadtportal (Wirkung gohome) setzt per pos_correct
+#   Version 15: hit mit bless = true = Stärkung trifft (nur Treffer-GFX des Angriffspunkts, keine Zahl; an alle in
+#   Sicht); heal amount = ganzer Heilbetrag, auch bei vollem Leben; world_ready towns [[x, y, z], ...] = Stadtpunkte
+#   der Welt (Stadtportal und Wiederbeleben führen zum nächsten; Client: Name der Rückkehrstadt im Stadtportal-Text)
+#   Version 16 (F7): skill_info passive (wirkt von selbst, skill_cast -> SKILL_PASSIVE) und switch (Schalter);
+#   skill_cast auf einen eingeschalteten Schalter schaltet ihn aus -> {id, time: 0, off: true} (ohne Kosten, auch in
+#   der Abklingzeit); Meldung skill_switch {id, on} (Schalter an / aus, auch wenn seine Effekte enden); world_ready
+#   skills.switched [IDs]; debug_skill {id, level} -> {id, level} (Tests, nur mit debug_commands): Fertigkeit lernen
+#   Version 17 (F8): world_ready skills.catalog [[ID, nächste Stufe (0 = ausgelernt), benötigte Stufe, Kosten Kupfer,
+#   max_learn, type, use, Stufe der ersten Lernstufe]] = Klassen-Fertigkeiten der Figur (bis Stufe 20 lernt sie sie von selbst: skill_new / skill_level);
+#   skill_learn {id} -> {id, level, cost} (darüber gegen Gold; SKILL_NOT_LEARNABLE / SKILL_MAXED / SKILL_LEVEL_LOW
+#   {need} / SKILL_PREREQ {skill, level} / NOT_ENOUGH_MONEY {cost}); Meldungen skill_catalog {list} (nach dem Lernen),
+#   skill_forget {id} (Quest-Belohnung del_skill); Quest-Belohnungen lehren Fertigkeiten (Rassen-Segen u.a.);
+#   debug_char {level, money} -> {level, money} (Tests, nur mit debug_commands: Stufe / Geld setzen, lernt bis Stufe 20);
+#   stats attr enthält res [8] (Widerstand physisch, Erde, Wasser, Feuer, Wind, Licht, Dunkel, PvE) und mas [8]
+#   (Meisterschaft ebenso)
+# Version 18 (Zwischen-Fahrplan Z1): world_ready skills.race [[ID, type, use]] (Rassen-Fertigkeiten der Figur für den
+#   K-Reiter Rasse, auch noch nicht erhaltene); Rassen-Segen und Werwolf-Verwandlung kommen aus versteckten Quests
+#   (quest_event ohne Anzeige); quests active-Fortschritt n (Methode 11: so oft ist die gesuchte Quest erfüllt);
+#   quest_event "new" mit items [[ID, Anzahl, Platz]] (bei der Vergabe ausgehändigte Gegenstände)
+# Version 19 (Z3): quest_where {kind ("mon" Monster-Vorlage / "item" Gegenstand einer laufenden Quest), id, quest} -> {map,
+#   world (-1 = anderes Gebiet), pos} nächster Ort des Ziels für die Autoroute (Monster: lebende Figur der Vorlage; Gegenstand:
+#   Sammelpunkt mit task_in / task_out = quest oder dem Gegenstand im Ertrag), sonst TARGET_INVALID
+# Version 20 (Z4): zweite Währung Seelenmünzen (bind_money, Kupfer; gebunden): stats bind_money, quest_event bind
+#   (Quest-Belohnung, mit Stufenfaktor), kill bind (Monstergeld); skill_learn {id, gold} zahlt zuerst mit Seelenmünzen;
+#   reichen sie nicht -> NOT_ENOUGH_BIND_MONEY {cost, bind}, mit gold = true deckt Gold den Rest (fehlt auch das:
+#   NOT_ENOUGH_MONEY {cost}); Antwort {id, level, cost, bind, gold} (bezahlt je Währung); debug_char {level, money,
+#   bind_money}
+# Version 21 (Z5): item_use {pos} -> {pos, id, time} (Quest-Würfel wie der EXP-Cocktail: nach time s use_end {pos, id, ok},
+#   Bewegen bricht ab; ITEM_NOT_USABLE, sonst der Code der Quest-Bedingung); quest_accept mit npc 0 für Fenster-Quests (ui,
+#   Essenz-Tausch in Win_LvupAward); Quest-EXP mit Stufenfaktor; Quests mit Mindeststufe (Server-tasks.data);
+#   QUEST_LIMIT (max_fin: Quest in diesem Zeitraum schon so oft erfüllt, z.B. Cocktail-Tausch 5 / Tag)
+# Version 22 (Gegenstände): item_destroy {pos, id} -> {pos} (ganzer Stapel weg wie c2s_CmdDestroyItem; ITEM_INVALID wenn dort
+#   nicht id liegt, ITEM_NOT_DESTROYABLE bei proc 0x400); gather: GATHER_NEED_TOOL, wenn der Sammelpunkt ein Werkzeug
+#   verlangt (tools) und keins in der Tasche ist - das Werkzeug wird nach Wahrscheinlichkeit verbraucht (Fackel-Quests)
+#   debug_state {state, target, time, values} -> {ok}   Effekt anlegen (Tests; nur mit Server-Einstellung
+#                                       debug_commands, sonst NOT_ALLOWED); target 0 = die eigene Figur
 # Welt (nach world_ready):
 #   MOVE   Client -> Server, unzuverlässig, 10 / s: Position x, y, z, Richtung (Bogenmaß), Zustand
 #   STATE  Server -> Client, unzuverlässig, bis 10 / s: [[id, x, y, z, Richtung, Zustand], ...] der
@@ -84,15 +129,15 @@ extends RefCounted
 #   Meldungen: player_enter {id, name, race, gender, class, level, appearance, pos, dir} (kommt in Sicht),
 #   player_leave {id}, pos_correct {pos, dir} (Bewegung abgelehnt, Figur zurücksetzen)
 #   Quests: quests {active, done} (Zustand nach jeder Änderung), quest_event {id, kind ("new" /
-#   "done" / "failed" / "bag_full"), exp, gold, items: [[ID, Anzahl, Platz]]}, stats {level, exp,
-#   exp_next, hp, max_hp, mp, max_mp, money, attr: {dmg: [min, max], def, hit, eva, crit, crit_dmg,
+#   "done" / "failed" / "bag_full"), exp, gold, bind, items: [[ID, Anzahl, Platz]]}, stats {level, exp,
+#   exp_next, hp, max_hp, mp, max_mp, money, bind_money, attr: {dmg: [min, max], def, hit, eva, crit, crit_dmg,
 #   anti_crit, anti_crit_dmg}}
 #   Inventar: inventory {size, bag: [[Platz, ID, Anzahl]], equip: [[Platz, ID]]} (nach jeder Änderung),
 #   gather_end {id, ok, items: [[ID, Anzahl]]} (Sammeln fertig bzw. abgebrochen), player_equip {id,
 #   equip} (Ausrüstung einer sichtbaren Figur geändert; player_enter enthält equip ebenso)
 #   Kampf: hit {src, dst, dmg, miss, crit, hp, max_hp} (Treffer in Sicht, src / dst Figur oder Monster),
 #   die {id} / revive {id, pos} (Spieler in Sicht stirbt / steht wieder auf; player_enter enthält dead),
-#   kill {id, tid, exp} (eigener Todesstoß); Monster sterben mit npc_leave {die: true}
+#   kill {id, tid, exp, bind} (eigener Todesstoß; bind = Seelenmünzen); Monster sterben mit npc_leave {die: true}
 # NPCs und Monster (IDs ab NPC_ID_BASE, Vorlage = ID in elements.data), zuverlässige Meldungen:
 #   npc_enter {list: [[id, Vorlage, x, y, z, Richtung, Stufe, Gang], ...]}  kommen in Sicht
 #             Gang = [] (steht) oder [Ziel x, y, z, Tempo m/s] (läuft gerade dorthin)
@@ -103,7 +148,7 @@ extends RefCounted
 # Die Codes TIMEOUT, DISCONNECTED, NOT_CONNECTED, CONNECT_FAILED setzt der Client selbst.
 # ====================================================
 
-const VERSION = 12
+const VERSION = 22
 const DEFAULT_PORT = 29000
 const REQUEST_TIMEOUT = 10.0 # Sekunden bis eine Anfrage ohne Antwort scheitert
 const CONNECT_TIMEOUT = 8.0
@@ -176,6 +221,7 @@ enum Code {
 	QUEST_NOT_DONE = 44,
 	QUEST_BAG_FULL = 45,
 	QUEST_NO_GIVEUP = 46,
+	QUEST_LIMIT = 47,
 	# Inventar, Sammeln
 	ITEM_INVALID = 50,
 	ITEM_CANNOT_EQUIP = 51,
@@ -185,6 +231,9 @@ enum Code {
 	GATHER_TOO_FAR = 55,
 	GATHER_NO_TASK = 56,
 	GATHER_BUSY = 57,
+	GATHER_NEED_TOOL = 58,
+	ITEM_NOT_USABLE = 59,
+	ITEM_NOT_DESTROYABLE = 49,
 	# Kampf
 	ATTACK_INVALID = 60,
 	YOU_ARE_DEAD = 61,
@@ -199,6 +248,16 @@ enum Code {
 	SKILL_BUSY = 76,
 	SKILL_NOT_YET = 77,
 	NO_TARGET = 78,
+	SKILL_SEALED = 79,
+	ATTACK_SEALED = 80,
+	NOT_ALLOWED = 81,
+	SKILL_PASSIVE = 82,
+	SKILL_NOT_LEARNABLE = 83,
+	SKILL_MAXED = 84,
+	SKILL_LEVEL_LOW = 85,
+	SKILL_PREREQ = 86,
+	NOT_ENOUGH_MONEY = 87,
+	NOT_ENOUGH_BIND_MONEY = 88,
 }
 
 const TEXTS = {
@@ -240,6 +299,7 @@ const TEXTS = {
 	Code.QUEST_NOT_DONE: "Diese Quest ist noch nicht erfüllt.",
 	Code.QUEST_BAG_FULL: "Euer Inventar ist voll.",
 	Code.QUEST_NO_GIVEUP: "Diese Quest kann nicht aufgegeben werden.",
+	Code.QUEST_LIMIT: "Das habt Ihr in diesem Zeitraum schon zu oft getan.",
 	Code.ITEM_INVALID: "Diesen Gegenstand gibt es dort nicht.",
 	Code.ITEM_CANNOT_EQUIP: "Diesen Gegenstand kann man nicht anlegen.",
 	Code.ITEM_REQUIREMENTS: "Ihr erfüllt die Bedingungen für diesen Gegenstand nicht (Stufe, Klasse, Rasse oder Geschlecht).",
@@ -248,6 +308,9 @@ const TEXTS = {
 	Code.GATHER_TOO_FAR: "Ihr seid zu weit entfernt.",
 	Code.GATHER_NO_TASK: "Dafür fehlt Euch die passende Quest.",
 	Code.GATHER_BUSY: "Hier wird schon gesammelt.",
+	Code.ITEM_NOT_USABLE: "Dieser Gegenstand lässt sich nicht benutzen.",
+	Code.GATHER_NEED_TOOL: "Euch fehlt das passende Werkzeug.",
+	Code.ITEM_NOT_DESTROYABLE: "Dieser Gegenstand kann nicht zerstört werden.",
 	Code.ATTACK_INVALID: "Dieses Ziel kann nicht angegriffen werden.",
 	Code.YOU_ARE_DEAD: "Ihr seid tot.",
 	Code.NOT_DEAD: "Ihr seid nicht tot.",
@@ -260,6 +323,16 @@ const TEXTS = {
 	Code.SKILL_BUSY: "Ihr wirkt gerade eine andere Fertigkeit.",
 	Code.SKILL_NOT_YET: "Diese Fertigkeit lässt sich noch nicht einsetzen.",
 	Code.NO_TARGET: "Kein gültiges Ziel ausgewählt.",
+	Code.SKILL_SEALED: "Diese Fertigkeit könnt Ihr gerade nicht einsetzen.",
+	Code.ATTACK_SEALED: "Ihr könnt gerade nicht angreifen.",
+	Code.NOT_ALLOWED: "Das ist auf diesem Server nicht erlaubt.",
+	Code.SKILL_PASSIVE: "Passive Fertigkeiten wirken von selbst.",
+	Code.SKILL_NOT_LEARNABLE: "Diese Fertigkeit könnt Ihr nicht lernen.",
+	Code.SKILL_MAXED: "Diese Fertigkeit hat schon ihre höchste lernbare Stufe.",
+	Code.SKILL_LEVEL_LOW: "Eure Stufe reicht dafür noch nicht.",
+	Code.SKILL_PREREQ: "Dafür fehlt Euch noch eine andere Fertigkeit.",
+	Code.NOT_ENOUGH_MONEY: "Ihr habt nicht genug Seelen- und Goldmünzen.",
+	Code.NOT_ENOUGH_BIND_MONEY: "Ihr habt nicht genug Seelenmünzen.",
 }
 
 # Texte in den anderen Sprachordnern der Spieldaten (fehlt einer, gilt der deutsche)
@@ -303,6 +376,7 @@ const TEXTS_BY_LANGUAGE = {
 		Code.QUEST_NOT_DONE: "This quest is not completed yet.",
 		Code.QUEST_BAG_FULL: "Your inventory is full.",
 		Code.QUEST_NO_GIVEUP: "This quest cannot be abandoned.",
+		Code.QUEST_LIMIT: "You have done this too often for now.",
 		Code.ITEM_INVALID: "This item is not there.",
 		Code.ITEM_CANNOT_EQUIP: "This item cannot be equipped.",
 		Code.ITEM_REQUIREMENTS: "You do not meet the requirements for this item (level, class, race or gender).",
@@ -311,6 +385,9 @@ const TEXTS_BY_LANGUAGE = {
 		Code.GATHER_TOO_FAR: "You are too far away.",
 		Code.GATHER_NO_TASK: "You need the matching quest for this.",
 		Code.GATHER_BUSY: "Someone is already gathering here.",
+		Code.ITEM_NOT_USABLE: "This item cannot be used.",
+		Code.GATHER_NEED_TOOL: "You do not have the required tool.",
+		Code.ITEM_NOT_DESTROYABLE: "This item cannot be destroyed.",
 		Code.ATTACK_INVALID: "This target cannot be attacked.",
 		Code.YOU_ARE_DEAD: "You are dead.",
 		Code.NOT_DEAD: "You are not dead.",
@@ -323,6 +400,16 @@ const TEXTS_BY_LANGUAGE = {
 		Code.SKILL_BUSY: "You are already using a skill.",
 		Code.SKILL_NOT_YET: "This skill cannot be used yet.",
 		Code.NO_TARGET: "No valid target selected.",
+		Code.SKILL_SEALED: "You cannot use this skill right now.",
+		Code.ATTACK_SEALED: "You cannot attack right now.",
+		Code.NOT_ALLOWED: "This is not allowed on this server.",
+		Code.SKILL_PASSIVE: "Passive skills take effect on their own.",
+		Code.SKILL_NOT_LEARNABLE: "You cannot learn this skill.",
+		Code.SKILL_MAXED: "This skill is already at its highest learnable level.",
+		Code.SKILL_LEVEL_LOW: "Your level is too low for that.",
+		Code.SKILL_PREREQ: "You still need another skill for that.",
+		Code.NOT_ENOUGH_MONEY: "You do not have enough Soul Coins and Gold Coins.",
+		Code.NOT_ENOUGH_BIND_MONEY: "You do not have enough Soul Coins.",
 	},
 	"Franz": {
 		Code.OK: "OK",
@@ -363,6 +450,7 @@ const TEXTS_BY_LANGUAGE = {
 		Code.QUEST_NOT_DONE: "Cette quête n'est pas encore terminée.",
 		Code.QUEST_BAG_FULL: "Votre inventaire est plein.",
 		Code.QUEST_NO_GIVEUP: "Cette quête ne peut pas être abandonnée.",
+		Code.QUEST_LIMIT: "Vous l'avez déjà fait trop souvent pour le moment.",
 		Code.ITEM_INVALID: "Cet objet n'est pas là.",
 		Code.ITEM_CANNOT_EQUIP: "Cet objet ne peut pas être équipé.",
 		Code.ITEM_REQUIREMENTS: "Vous ne remplissez pas les conditions de cet objet (niveau, classe, race ou sexe).",
@@ -371,6 +459,9 @@ const TEXTS_BY_LANGUAGE = {
 		Code.GATHER_TOO_FAR: "Vous êtes trop loin.",
 		Code.GATHER_NO_TASK: "Il vous faut la quête correspondante.",
 		Code.GATHER_BUSY: "Quelqu'un récolte déjà ici.",
+		Code.ITEM_NOT_USABLE: "Cet objet ne peut pas être utilisé.",
+		Code.GATHER_NEED_TOOL: "Il vous manque l'outil nécessaire.",
+		Code.ITEM_NOT_DESTROYABLE: "Cet objet ne peut pas être détruit.",
 		Code.ATTACK_INVALID: "Cette cible ne peut pas être attaquée.",
 		Code.YOU_ARE_DEAD: "Vous êtes mort.",
 		Code.NOT_DEAD: "Vous n'êtes pas mort.",
@@ -383,6 +474,16 @@ const TEXTS_BY_LANGUAGE = {
 		Code.SKILL_BUSY: "Vous utilisez déjà une compétence.",
 		Code.SKILL_NOT_YET: "Cette compétence ne peut pas encore être utilisée.",
 		Code.NO_TARGET: "Aucune cible valide sélectionnée.",
+		Code.SKILL_SEALED: "Vous ne pouvez pas utiliser cette compétence pour le moment.",
+		Code.ATTACK_SEALED: "Vous ne pouvez pas attaquer pour le moment.",
+		Code.NOT_ALLOWED: "Ce n'est pas autorisé sur ce serveur.",
+		Code.SKILL_PASSIVE: "Les compétences passives agissent d'elles-mêmes.",
+		Code.SKILL_NOT_LEARNABLE: "Vous ne pouvez pas apprendre cette compétence.",
+		Code.SKILL_MAXED: "Cette compétence est déjà à son niveau maximal.",
+		Code.SKILL_LEVEL_LOW: "Votre niveau est trop bas.",
+		Code.SKILL_PREREQ: "Il vous manque encore une autre compétence.",
+		Code.NOT_ENOUGH_MONEY: "Vous n'avez pas assez d'écus psy et d'écus d'or.",
+		Code.NOT_ENOUGH_BIND_MONEY: "Vous n'avez pas assez d'écus psy.",
 	},
 }
 

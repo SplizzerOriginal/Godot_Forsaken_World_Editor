@@ -22,7 +22,8 @@ Aufbau
   server/server.gd        Server: Verbindungen, Versionsprüfung, Anfragen, Log / Status / Stop,
                           Passwort-Hash im Hintergrund-Thread, Last (Takt-Dauer, längstes Bild, Netz)
   server/db.gd            Hülle über die SQLite-Erweiterung (Werte immer gebunden)
-  server/schema.gd        Tabellen accounts, characters, inventory, quests; Versionsnummer
+  server/schema.gd        Tabellen accounts, characters (money Goldmünzen, bind_money Seelenmünzen seit Z4), inventory,
+                          quests, skills, shortcuts, buffs (Effekte über das Abmelden, Z2); Versionsnummer
   server/accounts.gd      Konten: PBKDF2-SHA256 mit Salt (50.000 Runden, im Hintergrund gerechnet),
                           Fehlversuche begrenzt
   server/characters.gd    Figuren: Liste, anlegen nach Startvorlage (Plugin Server/start_roles.json),
@@ -70,17 +71,27 @@ Aufbau
                           in der Sprache des Clients, Modelle aus dem Map-Import)
   client/world_npc.gd     NPC / Monster in der Welt: Modell, Name, Stehen / Leerlauf / Gehen
   client/client.gd        einfaches Anmelde-Fenster, wenn keine Spieldaten da sind
-  tests/bot.gd            Test-Bot (172 Prüfungen inkl. Figuren, Welt, NPCs, Ziel, Chat, Quests, Startquest jeder
+  tests/bot.gd            Test-Bot (189 Prüfungen inkl. Figuren, Welt, NPCs, Ziel, Chat, Quests, Startquest jeder
                           Rasse / Klasse, Inventar, Kampf, Fertigkeiten einsetzen, Tod), auch als Knopf
                           "Bot-Test" in der Leiste SERVER
   tests/login_test.gd     Test des Logins im Spielstil (18 Prüfungen), braucht einen Server
   tests/char_test.gd      Test von Figurenauswahl und -erstellung, braucht einen Server
-  tests/world_test.gd     Test der Welt mit NPCs, HUD, Quests, Autoroute, Inventar, Kampf und Fertigkeiten (129 Prüfungen), braucht einen Server und die
+  tests/world_test.gd     Test der Welt mit NPCs, HUD, Quests, Autoroute, Inventar, Kampf, Fertigkeiten, Shylias Markt und Gegenständen (159 Prüfungen), braucht einen Server und die
                           importierte s9 (mit dem Map-Import ab Schritt 7, sonst fehlen die Modelle)
   tests/skill_data_test.gd  Test der Fertigkeiten-Daten (9 Prüfungen: Formeln, Effekte, Startfertigkeiten
                           gegen die Spieltexte), ohne Server
-  tests/buff_test.gd      Test der Statuseffekte mit eigener Uhr (15 Prüfungen: Brennen, Regeln, Stapel, Werte,
-                          Heilung, Ablauf, Tod), ohne Server
+  tests/buff_test.gd      Test der Statuseffekte mit eigener Uhr (37 Prüfungen: Brennen, Regeln, Stapel, Werte, Kontrolle,
+                          Heilung, Ablauf, Tod, Rassen-Fertigkeiten), ohne Server
+  tests/quest_test.gd     Test der Quest-Regeln mit den echten Quest-Daten (38 Prüfungen: Rassen-Segen, Mit-Quest,
+                          Effekt-Bedingungen, Methode 11, ausgehändigte Gegenstände; Werwolf- und Kindred-Kette;
+                          Seelenmünzen und EXP mit Stufenfaktor, Essenz-Geschenke, Tausch, Würfel-Quests), ohne Server
+  tests/item_test.gd      Test der Gegenstände mit echtem Inventar und echten Quests (12 Prüfungen: Fackel-Kette 5694 mit
+                          Sammel-Werkzeugen, Zerstören, Benutzen), ohne Server
+  tests/collision_test.gd Test der Kollision (8 Prüfungen: Gebäude-Hüllen s9 / s11, flache Bodenplatten, Fall-Test der
+                          Figur auf allen begehbaren Böden über dem Gelände um die Starts der Zwerge, Menschen und Kindred,
+                          Spawn-Höhen der Zwergenstadt, Stufen 0,3 / 0,6 / 1,0 m), ohne Server und ohne importierte Map
+  tests/class_test.gd     Startfertigkeiten aller 14 Rasse / Klasse-Kombinationen, Rassen-Segen und Gebet, Stadtportal, Passiv, Schalter und Lernen mit Seelen- / Goldmünzen (203 Prüfungen)
+                          mit eigenem Server (Maps s9, s10, s11, s31)
   tests/npc_test.gd       Test der NPCs und Monster des Servers (15 Prüfungen), ohne Server:
                           Godot --headless --path Projekt -s res://game/tests/npc_test.gd
   tests/restart_test.gd   Neustart, Absturz, Wiederverbinden (40 Prüfungen) mit eigenem Server: Neustart
@@ -114,7 +125,7 @@ Starten
 
 Alle Tests (Fahrplan 11)
   Leiste SERVER -> "Alle Tests" oder von Hand:
-    Godot --headless --path Projekt -s res://game/tests/run_all.gd [-- --full] [--only=bot,welt]
+    Godot --headless --path Projekt -s res://game/tests/run_all.gd [-- --full] [--only=bot,welt] [--variant=Vulkan,GL]
   startet jeden Test als eigenen Prozess: NPC-Test; eigener Server (user://test_server/alle, frische
   Datenbank, Port 29100) mit Bot, Login-, Figuren- und Welt-Test; Server neu starten und Bot
   --expect-existing; Neustart- (Port 29110), Wiederverbinden- (29130) und Lasttest (29120) mit je
@@ -199,6 +210,73 @@ In der Welt
   Effekts und Restzeit. Symbole, Art und Texte kommen aus den Spieldaten (configs buff_type / buff_icon /
   buff_str, Atlas iconlist_state; Plugin Data/angelica_buffs.gd). Effekte mit sichtbarem Zustand zeigen
   ihr GFX an der Figur (buff_gfx.lua, z.B. Flammen am Rücken beim Brennen) - bei allen Figuren in Sicht.
+  Kontrolle (F5): Betäuben, Wurzeln, Schweigen, kein Normalangriff, Entwaffnen und Unverwundbar wirken wie
+  im Original über Siegel: der Server weist gesperrte Aktionen ab (Bewegen wird zurückgesetzt, Angriff /
+  Fertigkeit mit Meldung), der Client hält die Figur an, meldet die Sperre im Chat und dunkelt gesperrte
+  Fertigkeiten ab (manche Fertigkeiten gehen auch betäubt bzw. entwaffnet, das sagen die Daten). Monster
+  bleiben gewurzelt stehen, betäubt tun sie gar nichts. Dazu Unterbrechen des Zauberns, Rückstoß, Spott,
+  Bannen und Immunität. Beispiel: der Eispfeil des Magiers hält ein Monster 3 s fest. Testserver erlauben mit
+  --debug_commands den Testbefehl debug_state (beliebigen Effekt anlegen).
+  Alle Startfertigkeiten (F6): jede Klasse kann ihre beiden Startfertigkeiten und das Stadtportal nutzen -
+  dazu gehören Stärkungen (Heilen, Mentaler Fokus: auf den gewählten Spieler bzw. auf sich), der Überfall des
+  Kriegers (stürmt bis vor das Ziel und betäubt es) und das Stadtportal (9,85 s zaubern, dann am nächsten
+  Stadtpunkt der Welt; Bewegen bricht ab). Die Aktionen kommen als kombinierte Aktionen der .ecm (Grundaktion
+  der .smd plus GFX / Klang): Heilen zeigt Animation, Zauber-GFX und das Treffer-GFX am Ziel, die Heilzahl
+  nennt den ganzen Betrag auch bei vollem Leben; das Stadtportal zeigt sein Schleifen-GFX bis zum Ende, setzt
+  die Figur am Stadtpunkt auf den Boden und nennt im Text die Rückkehrstadt (Gebiete aus precinct.clt).
+  Passive Fertigkeiten und Schalter (F7): passive Fertigkeiten wirken von selbst - ihre Dauer-Effekte liegen ab
+  dem Lernen und nach jedem Betreten der Welt (z.B. Krieger "Stärken": Leben +1 % je Stufe), sie lassen
+  sich nicht einsetzen und kommen auf keine Leiste. Schalter (z.B. "Wirkungstreffer-Zeit" des Schützen, "Mitgefühl"
+  des Priesters, "Schattenschutz" des Assassinen, "Magische Meditation" des Magiers) schalten sich beim Einsetzen
+  ein - das Symbol bekommt einen hellen Rahmen -
+  und beim nächsten Einsetzen wieder aus (ohne Kosten, auch in der Abklingzeit); enden ihre Effekte, sind sie
+  ebenfalls aus.
+  Lernen (F8): bis Stufe 20 lernt die Figur ihre Klassen-Fertigkeiten und deren Stufen von selbst (Popup "Neue
+  Fertigkeiten"), darüber im K-Fenster mit dem Plus-Knopf gegen Seelenmünzen (Z4; Gold nur nach Rückfrage). Rassen-Fertigkeiten (Rassen-Segen u.a.)
+  gibt es als Quest-Belohnung. Das K-Fenster hat die Reiter Grundlagen, Klasse, Rasse, Beruf, Talent und Seele;
+  Talent und Seele zeigen unter Stufe 20 bzw. 60 einen Hinweis. Im C-Fenster klappt der Abschnitt
+  Meisterschaft / Widerstand auf. Testserver können mit debug_skill / debug_char Fertigkeiten, Stufe, Gold- und Seelenmünzen setzen.
+  Rassen-Fertigkeiten (Zwischen-Fahrplan Z1): jede Figur hat ab Stufe 1 den Segen ihrer Rasse (Segen der Menschen,
+  Elfen, Zwerge, Steinmenschen, Kindred, Werwölfe - aus versteckten Quests, wie im Original); der Reiter Rasse im
+  K-Fenster zeigt alle Rassen-Fertigkeiten, noch nicht erhaltene grau ("Quest"). Quests kennen jetzt Mit-Quests,
+  Effekt-Bedingungen, "Quest mehrmals erfüllen" und ausgehändigte Gegenstände - damit geht die Kindred-Hauptkette über
+  "Erste Begegnung" (Vampirischer Kuss) weiter.
+  Rassen-Fertigkeiten wirken (Z2): Gebet ist sofort da, auch im Laufen, ohne Animation - unter der Figur erscheint
+  der blaue Kreis seines Effekts, das Mana füllt sich um 25 % auf, Betäuben u.a. wird gelöst und wirkt 4 s nicht.
+  Die Segen geben ihre Werte (auch Meisterschaften und weniger Schaden) und bleiben über das Abmelden erhalten
+  (Restzeit läuft offline nicht weiter). Sofort-Fertigkeiten halten die Figur nicht an.
+  Quest-Routen (Z3): Monster- und Sammel-Ziele sind grüne Links in der Verfolgung, in "Aktuelle Quest" und im
+  Q-Fenster - ein Klick fragt den Server nach dem nächsten Monster bzw. Sammelpunkt und startet die Autoroute.
+  Ist das Ziel erreicht, steht "Zurück zu <NPC>" als Link zum Abgabe-NPC darunter. Die Beschreibung im Q-Fenster rollt.
+  Seelenmünzen (Z4): zweite Währung neben den Goldmünzen, gebunden, im Inventar über dem Gold (mit dem Hinweis des
+  Spiels). Monster lassen sie fallen (Durchschnitt +- Streuung der Monster-Vorlage, z.B. Wildschwein 0 - 3 Kupfer), Quests
+  geben sie (1604 Quests; meist Wert * Faktor der Figurenstufe - auf Stufe 1 - 2 noch 0, ab Stufe 3 einige Kupfer, auf
+  Stufe 20 einige Silber). Lernen im K-Fenster kostet Seelenmünzen; reichen sie nicht, fragt ein Meldungsfenster, ob
+  Goldmünzen den Rest decken. Chat: "Seelenmünzen erhalten: ...", das Q-Fenster nennt die Belohnung für die eigene Stufe.
+  Essenzen und EXP-Cocktails (Z5): ab Stufe 3 gibt es bei jedem Aufstieg Prüfungs-Essenzen (Stufe 10: 5, 20: 8 ...). Der
+  Geschenk-Knopf oben rechts öffnet Shylias Markt; unter "Gratis EXP" tauscht man 1 Essenz gegen einen Orangenen
+  EXP-Cocktail (ab Stufe 20 2 Essenzen gegen einen Gelben), höchstens 5 am Tag. Rechtsklick auf den Cocktail: 2 s "Trinken",
+  dann EXP. Quest-EXP rechnet jetzt wie im Original mit einem Stufenfaktor (die erste Menschen-Quest gibt 120 statt 40 EXP),
+  Quests prüfen ihre Mindeststufe (aus der Server-Questdatei), und die Rassen-Segen gibt es wie im Original erst ab Stufe 10.
+  Gegenstände (Bug-Fahrplan B1, Protokoll 22): Rechtsklick in der Tasche benutzt (EXP-Cocktail) bzw. legt Ausrüstung an.
+  Zerstören wie im Original: Knopf "Zerstören" im Inventar, dann ein Gegenstand anklicken - oder einen Gegenstand aus
+  dem Fenster in die Welt bzw. auf den Knopf ziehen; es folgt eine Rückfrage (ab Qualität 4 muss man "Ja" eintippen).
+  Manche Gegenstände sind unzerstörbar (Quest-Fackeln, Prüfungs-Essenz). Sammelpunkte, die ein Werkzeug verlangen
+  (z.B. Lagerfeuer und Zentaurenkanone der "Ersten Mission"), nehmen es selbst aus der Tasche und verbrauchen es; ohne
+  Werkzeug kommt ein Hinweis. Der Tooltip kommt aus dem Beschreibungs-Skript des Spiels (Name in Qualitätsfarbe, Platz,
+  Bedingungen, Werte, Verstärkungs-Stufe, Preis mit Münz-Symbol - gebunden = Seelenmünzen - und der Zusatztext).
+  C-Fenster (Z6): zwei Seiten wie im Original - "Grundattribute" und "Meisterschaft / Widerstand" sind eigene Fenster an
+  derselben Stelle, die Reiter schalten um; die Figur ist das Bild des Spiels (kein 3D-Bild mehr). Meisterschaft und
+  Widerstand haben ihre Grundwerte je Klasse und Stufe (Krieger Stufe 1: physisch 8, Wind 7), der letzte Platz zeigt
+  PvE-Intensität / -Zähigkeit (0). Angriff, Verteidigung, Genauigkeit, Ausweichen und Krit zeigen die Effekte mit
+  (z.B. Segen der Elfen +25 Genauigkeit). Die Rassen-Segen haben die Werte des Spieltexts (Menschen +3 % Leben und +25 auf
+  alle Meisterschaften inkl. physisch, Elfen +25 Widerstände und Genauigkeit, Kindred +8 % Leben, Steinmenschen +3 %
+  Verteidigung). Ab Stufe 4 steigen Treffer / Ausweichen, ab Stufe 21 Angriff / Verteidigung um die Stufen-Zuschläge.
+  Kollision (Bug-Fahrplan B2): Gebäude, Höhlenwände und -böden haben ihre Kollision wie im Original aus den Hüllen der
+  Gebäude-Dateien (auch flache Bodenplatten - durch die fiel man vorher in der Zwergenstadt und bei den Kindred durch).
+  Kanten bis 0,8 m nimmt die Figur beim Laufen hinauf. Monster und Sammelpunkte in Höhlen- und Stadtgebieten stehen auf
+  dem begehbaren Boden statt auf dem Gelände darunter (Server mit der Wegekarte, Server/data/<Ordner>/movemaps).
+  Bleibt die Autoroute an einem Hindernis hängen, das die Wegekarte nicht kennt, sucht sie außen herum einen neuen Weg.
   Effekte (wie CECModel::PlayAttackAction): jede Angriffs-Aktion hat in ihrer .ecm Angriffspunkte
   (Ereignis 104, z.B. Schwert 350 ms, Magierstab 750 ms, Dolch zweimal). Dort startet ihre .att
   (gfx\SkillAttack\): Flug-GFX vom Angreifer zum Ziel (der Energieball des Magiers, 30 m/s im

@@ -22,4 +22,8 @@ Einfügestellen der Client-Version 184 (in gen_tasks_schema.py eingetragen), so 
   - Genaue Lage in den Bereichen über plausible Werte: +4 vor m_ulPremise_Lev_Max (NPC-IDs
     und Stufen zu 99,998 % plausibel), m_enumMethod bei 3554 + 8 (Art 1 / 2 genau dann, wenn
     Monster- / Gegenstandsliste gefüllt).
+  - Geprüft 2026-11-16: m_ulPremise_Lev_Min ist im Client immer 0. Die eingefügten 4 Bytes (447)
+    sind keine Mindeststufe: meist 200 (auch bei Startquests wie 5678), nur bei manchen Quests gleich
+    der Mindeststufe des Servers. Die Mindeststufen kommen darum aus der Server-tasks.data
+    (tools/server_data/quest_templates.gd, Offset 431).
 Eine neue Version: Quests nach demselben Verfahren prüfen und ihre Werte unter "versions" eintragen.

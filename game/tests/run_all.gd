@@ -2,14 +2,16 @@ extends SceneTree
 
 # ====================================================
 # Alle Tests nacheinander (Fahrplan 11.1), je Test ein eigener Godot-Prozess:
-#   godot --headless --path <Projekt> -s res://game/tests/run_all.gd -- [--full] [--only=bot,welt]
+#   godot --headless --path <Projekt> -s res://game/tests/run_all.gd -- [--full] [--only=bot,welt] [--variant=Vulkan,GL]
 #         [--port=29100]
-# Standard (gut 15 min, alles ohne Fenster): NPC-Test, Fertigkeiten-Daten, Statuseffekte; eigener Server (user://test_server/alle,
+# Standard (gut 15 min, alles ohne Fenster): NPC-Test, Fertigkeiten-Daten, Statuseffekte, Quest-Regeln, Gegenstände (Sammel-
+# Werkzeuge, Zerstören, Benutzen), Kollision (Höhlen, Stufen, Spawn-Höhen); eigener Server (user://test_server/alle,
 # frische Datenbank) mit Bot, Login-, Figuren- und Welt-Test; Server neu starten, Bot
 # --expect-existing (Konten und Figuren bleiben); Neustart-, Wiederverbinden- und Lasttest (je mit
 # eigenem Server). --full: Login-, Figuren-, Welt- und Wiederverbinden-Test zusätzlich mit Vulkan
 # und GL (Fenster) sowie auf Englisch und Französisch - die ganze Test-Routine, gut 1 h.
-# --only: nur diese Tests (npc, fertigkeiten, statuseffekte, bot, login, figuren, welt, neustart, wiederverbinden, last).
+# --only: nur diese Tests (npc, fertigkeiten, statuseffekte, quests, gegenstaende, kollision, bot, login, figuren, welt, neustart, wiederverbinden, last,
+# klassen: Startfertigkeiten aller Klassen und Stadtportal mit eigenem Server).
 # Jede Ausgabe (auch die der Server) wird nach "SCRIPT ERROR", "SHADER ERROR" und "ERROR:"
 # durchsucht; ein Fund zählt als Fehler, auch wenn der Test selbst OK meldet. Welt- und
 # Wiederverbinden-Test brauchen die importierte s9 (sonst übersprungen).
@@ -34,6 +36,9 @@ const TESTS = {
 	"npc": ["res://game/tests/npc_test.gd", "NPC-TEST OK", 300, false, false],
 	"fertigkeiten": ["res://game/tests/skill_data_test.gd", "FERTIGKEITEN-TEST OK", 300, false, false],
 	"statuseffekte": ["res://game/tests/buff_test.gd", "STATUSEFFEKTE-TEST OK", 300, false, false],
+	"quests": ["res://game/tests/quest_test.gd", "QUEST-TEST OK", 300, false, false],
+	"gegenstaende": ["res://game/tests/item_test.gd", "GEGENSTAENDE-TEST OK", 300, false, false],
+	"kollision": ["res://game/tests/collision_test.gd", "KOLLISIONS-TEST OK", 600, false, false],
 	"bot": ["bot", "BOT OK", 500, true, false],
 	"login": ["res://game/tests/login_test.gd", "LOGIN-TEST OK", 300, true, false],
 	"figuren": ["res://game/tests/char_test.gd", "FIGUREN-TEST OK", 300, true, false],
@@ -41,11 +46,13 @@ const TESTS = {
 	"neustart": ["res://game/tests/restart_test.gd", "NEUSTART-TEST OK", 400, false, false],
 	"wiederverbinden": ["res://game/tests/reconnect_test.gd", "WIEDERVERBINDEN-TEST OK", 400, false, true],
 	"last": ["res://game/tests/load_test.gd", "LAST-TEST OK", 500, false, false],
+	"klassen": ["res://game/tests/class_test.gd", "KLASSEN-TEST OK", 400, false, false],
 }
 
 var port = DEFAULT_PORT
 var full = false
 var only: Array = []
+var only_variants: Array = [] # --variant: nur diese Varianten
 var results: Array = [] # {name, variant, ok, checks, seconds, errors, note}
 var _progress: FileAccess
 var _server = {} # gemeinsamer Server: Prozess (_start)
@@ -96,6 +103,7 @@ func _initialize() -> void:
 	port = int(args.get("port", str(DEFAULT_PORT)))
 	full = args.has("full")
 	only = str(args.get("only", "")).split(",", false)
+	only_variants = str(args.get("variant", "")).split(",", false)
 	DirAccess.make_dir_recursive_absolute(DIR)
 	_progress = FileAccess.open(DIR.path_join("lauf.log"), FileAccess.WRITE)
 	if FileAccess.file_exists(SETTINGS_FILE):
@@ -107,12 +115,18 @@ func _run() -> void:
 	_say("Alle Tests (%s), Projekt %s" % ["voll" if full else "schnell", ProjectSettings.globalize_path("res://")])
 	var langs = ["Deu", "Eng", "Franz"] if full else ["Deu"]
 	var variants = VARIANTS.keys() if full else ["ohne Fenster"]
+	if not only_variants.is_empty(): # --variant=Vulkan,GL: nur diese Fenster-Varianten (zum Nachprüfen)
+		variants = variants.filter(func(v): return v in only_variants)
+		langs = ["Deu"]
 	var has_s9 = ResourceLoader.exists(MAP_S9)
 	if not has_s9:
 		_say("s9 ist nicht importiert (%s): Welt- und Wiederverbinden-Test werden übersprungen" % MAP_S9)
 	await _test("npc", "ohne Fenster", [])
 	await _test("fertigkeiten", "ohne Fenster", [])
 	await _test("statuseffekte", "ohne Fenster", [])
+	await _test("quests", "ohne Fenster", [])
+	await _test("gegenstaende", "ohne Fenster", [])
+	await _test("kollision", "ohne Fenster", [])
 
 	# gemeinsamer Server: Bot und die Client-Tests
 	if _wanted_any(["bot", "login", "figuren", "welt"]):
@@ -140,6 +154,7 @@ func _run() -> void:
 	else:
 		_skip("wiederverbinden", "s9 nicht importiert")
 	await _test("last", "ohne Fenster", [])
+	await _test("klassen", "ohne Fenster", [])
 
 	if _settings_backup != null:
 		var f = FileAccess.open(SETTINGS_FILE, FileAccess.WRITE)
@@ -238,7 +253,7 @@ func _start_server(fresh: bool) -> bool:
 			DirAccess.remove_absolute(SERVER_DIR.path_join(f))
 	DirAccess.remove_absolute(SERVER_DIR.path_join("server.log"))
 	var p = Proc.new(PackedStringArray(["--headless", "--path", ProjectSettings.globalize_path("res://"), GAME_MAIN, "--",
-		"--server", "--port=%d" % port, "--dir=" + SERVER_DIR]), DIR.path_join("server_%s.log" % ("frisch" if fresh else "neustart")))
+		"--server", "--port=%d" % port, "--dir=" + SERVER_DIR, "--debug_commands"]), DIR.path_join("server_%s.log" % ("frisch" if fresh else "neustart")))
 	var end = Time.get_ticks_msec() + 90000
 	while p.pump() and not p.out.contains("Bereit, warte auf Spieler") and Time.get_ticks_msec() < end:
 		await create_timer(0.2).timeout

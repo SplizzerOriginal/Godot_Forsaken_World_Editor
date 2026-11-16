@@ -5,7 +5,12 @@
 #   terrain.cfg   Raster des Terrains (Zeilen / Spalten der Teilkarten, Größe, Höhenbereich)
 #   map/<n>.hmap  Höhen je Teilkarte (Server/heightmap.gd), nur die nRow * nCol, die terrain.cfg
 #                 nennt (manche Ordner haben übrige Dateien)
-# Aufruf: python3 server_files.py <config-Ordner> <Server/data> s9 s10 s11 s31
+#   movemaps/     mit --client: die Wegekarte der Client-Map, die zu diesem Ordner gehört (Server/maps.json; pfmap.cfg,
+#                 <Ebene>.prmap / .pdhmap, MAP/angelica_movemap.gd) - der Server setzt damit Spawns in Gelände-Gebieten
+#                 wie path_finding::GetValidPos auf die begehbare Ebene (Höhlen- und Stadtböden über dem Gelände, Bug-
+#                 Fahrplan B2). Die Wegekarten des Servers (PfMap.cfg, .rmap / .dhmap) haben ein älteres Format.
+# Aufruf: python3 server_files.py <config-Ordner> <Server/data> s9 s10 s11 s31 [--client=<Stock-PWE-Client>]
+import json
 import os
 import re
 import shutil
@@ -42,11 +47,41 @@ def copy_folder(src_root, dst_root, folder):
     return total
 
 
+MOVEMAP_EXT = (".prmap", ".pdhmap")
+
+
+def copy_movemaps(client_root, dst_root, folder, maps_json):
+    with open(maps_json, encoding="utf-8") as f:
+        maps = json.load(f)["maps"]
+    names = [m for m, src in maps.items() if src and src[0]["folder"] == folder]
+    for m in sorted(names):
+        src = os.path.join(client_root, "maps", m, "movemaps")
+        if not os.path.isdir(src):
+            continue
+        dst = os.path.join(dst_root, folder, "movemaps")
+        os.makedirs(dst, exist_ok=True)
+        total = 0
+        for name in sorted(os.listdir(src)):
+            low = name.lower()
+            if low == "pfmap.cfg" or low.endswith(MOVEMAP_EXT):
+                shutil.copyfile(os.path.join(src, name), os.path.join(dst, name))
+                total += os.path.getsize(os.path.join(src, name))
+        print("%s: Wegekarte der Client-Map %s (%.1f MB)" % (folder, m, total / 1e6))
+        return total
+    print("%s: keine Client-Map mit Wegekarte" % folder)
+    return 0
+
+
 def main():
-    if len(sys.argv) < 4:
-        print(__doc__ or "python3 server_files.py <config-Ordner> <Server/data> <Ordner> ...")
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    opts = dict(a[2:].split("=", 1) for a in sys.argv[1:] if a.startswith("--") and "=" in a)
+    if len(args) < 3:
+        print(__doc__ or "python3 server_files.py <config-Ordner> <Server/data> <Ordner> ... [--client=<Ordner>]")
         sys.exit(1)
-    total = sum(copy_folder(sys.argv[1], sys.argv[2], f) for f in sys.argv[3:])
+    total = sum(copy_folder(args[0], args[1], f) for f in args[2:])
+    if "client" in opts:
+        maps_json = os.path.join(os.path.dirname(os.path.abspath(args[1])), "maps.json")
+        total += sum(copy_movemaps(opts["client"], args[1], f, maps_json) for f in args[2:])
     print("zusammen %.1f MB" % (total / 1e6))
 
 

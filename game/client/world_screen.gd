@@ -9,8 +9,10 @@ extends Node3D
 #      build_light), sonst ein Standardlicht - ohne Licht wären Figuren und NPCs schwarz;
 #      auf dem Haupt-Thread geladen (~1 s für s9; geladen in einem Thread blockierte das Laden der
 #      vielen GFX-Skripte der Szene einmal den ganzen Prozess)
-#   2. Kollision: Terrain-Flächen der Szene als Dreiecksnetz, Gebäude und Hindernisse aus der
-#      map.bht des Servers (Plugin Server/data/<Server-Ordner>/map.bht, brushes.gd) - in einem Thread
+#   2. Kollision: Terrain-Flächen der Szene als Dreiecksnetz; Gebäude wie im Original (CECOrnament / CECBrushMan, Bug-Fahrplan
+#      B2): die Kollisions-Hüllen aller Gebäude-Dateien, die die Map nennt (auch "nur Kollision", z.B. Höhlenwände und
+#      -böden), Plugin angelica_buildings.gd collision_faces - in einem Thread (~1,5 s); fehlt die Gebäude-Liste, die
+#      map.bht des Servers (Server/data/<Server-Ordner>/map.bht, brushes.gd; in s9 fehlen ihr ~850 Hüllen der Zwergenstadt)
 #   3. eigene Figur (angelica_player.gd mit Lauf-Animationen, local_player.gd) an die Position vom
 #      Server, dann world_ready
 # In der Welt: eigene Position 10 / s an den Server (nur bei Änderung, sonst jede Sekunde), STATE
@@ -41,7 +43,7 @@ extends Node3D
 # B / C in hud.gd, Anfragen equip / unequip / move_item; die eigene Figur (char_enter equip) und
 # andere (player_enter / player_equip) tragen ihre Ausrüstung (angelica_player.gd, bei Änderung neu
 # gebaut). Sammelpunkte (Objekte mit MINE_ESSENCE): Klick = hinlaufen (Autoroute bis dist) und
-# sammeln (gather, Fortschritt in Win_Prgs, Bewegen bricht ab), Ergebnis gather_end. Koordinaten-Links
+# sammeln (gather, Fortschritt in Win_Prgs, Bewegen bricht ab), Ergebnis gather_end; Rechtsklick auf einen Quest-Würfel benutzt ihn (item_use, Leiste wie beim Sammeln, use_end, Z5). Koordinaten-Links
 # in Quest-Texten (&pos:...&) starten die Autoroute dorthin.
 # Kampf (Schritt 9): zweiter Klick auf das gewählte Monster = hinlaufen (Autoroute bis in Reichweite)
 # und Normalangriff (attack; der Server schlägt im Takt zu, solange es in Reichweite ist; läuft es weg,
@@ -60,6 +62,13 @@ extends Node3D
 # die eigenen zeigt hud.gd in Win_Buff, die des Ziels im Ziel-Fenster (Art / Symbol / Text: Plugin
 # Data/angelica_buffs.gd); GFX am Modell je sichtbarem Zustand (light, buff_gfx.lua) wie SetNewExtendStates;
 # hit mit buff = Schaden über Zeit (nur Zahl), heal = grüne Zahl, stats speed_add = Tempo der Figur.
+# Kontrolle (F5): seal (Siegel der eigenen Figur wie LIES_*): root -> die Figur bleibt stehen (local_player rooted,
+# Autoroute endet), melee -> kein Normalangriff (Meldung ATTACK_SEALED), silent / disarm -> nur Fertigkeiten mit
+# skill_info dizzy / handfree (sonst SKILL_SEALED, Symbole dunkel); hit mit immune zeigt "Immun".
+# Startfertigkeiten (F6): Stärkungen (skill_info bless) gehen auf den gewählten Spieler, sonst auf die eigene Figur
+# (self: immer), ohne Monsterziel; Ansturm (skill_move) lässt die Figur in der Zeit zum Ziel laufen; Aktionen mit
+# Waffen-Varianten (z.B. 回城循环_空手 -> _巨剑, sonst _通用) in der passenden Variante, Schleifen-Aktionen (循环) bis zum
+# Ende des Zauberns; hit mit nodmg (Fluch ohne Schaden) zeigt keine Zahl.
 # Fehlt die Map, meldet der Bildschirm das und kehrt zurück.
 # ====================================================
 
@@ -74,13 +83,16 @@ const ItemData = preload("item_data.gd")
 const AttackFx = preload("attack_fx.gd")
 const PLAYER = "res://addons/PWE-Manager/ECM/angelica_player.gd"
 const BRUSHES = "res://addons/PWE-Manager/Server/brushes.gd"
-const SPAWNS = "res://addons/PWE-Manager/Server/spawn_builder.gd"
 const IMPORTER = "res://addons/PWE-Manager/ECM/ecm_importer.gd"
+const BUILDINGS = "res://addons/PWE-Manager/MAP/angelica_buildings.gd"
+const SPAWNS = "res://addons/PWE-Manager/Server/spawn_builder.gd"
 const WORLD = "res://addons/PWE-Manager/MAP/angelica_world.gd"
 const FILES = "res://addons/PWE-Manager/Data/angelica_files.gd"
 const MOVEMAP = "res://addons/PWE-Manager/MAP/angelica_movemap.gd"
 const SKILL_DATA = "res://addons/PWE-Manager/Data/angelica_skills.gd"
 const BUFF_DATA = "res://addons/PWE-Manager/Data/angelica_buffs.gd"
+const ITEM_DESC = "res://addons/PWE-Manager/Data/angelica_itemdesc.gd" # Tooltips wie das Original (LuaItemDesc)
+const PRECINCT = "res://addons/PWE-Manager/Data/angelica_precinct.gd"
 const LOADING = "LoadingGame.xml"
 const LOADING_IMAGE = "login\\%d.dds"
 const SEND_IDLE = 1.0 # Sekunden: ohne Änderung trotzdem senden
@@ -90,7 +102,12 @@ const RADAR_RANGE = 140.0 # m: Figuren für die Minimap
 const RADAR_RATE = 10.0 # Minimap-Bilder je Sekunde
 const TALK_RANGE = 4.0 # m: so nah läuft die Figur an einen NPC heran, bevor sein Fenster aufgeht
 const TALK_CLOSE = 10.0 # m: weiter weg schließt das NPC-Fenster (MAX_SERVICE_DISTANCE des gs)
-const ROUTE_REPLANS = 2 # neue Suchen, wenn die Figur auf der Autoroute feststeckt
+const ROUTE_REPLANS = 3 # neue Suchen, wenn die Figur auf der Autoroute feststeckt (je mit gesperrten Feldern davor)
+const STUCK_BLOCK_NEAR = 0.5 # m: gesperrter Streifen vor der festgesteckten Figur (Bug-Fahrplan B2) ...
+const STUCK_BLOCK_FAR = 2.0 # ... bis so weit
+const STUCK_BLOCK_HALF = 0.8 # ... halbe Breite
+const STUCK_BLOCK_PROGRESS = 1.0 # m: erst sperren, wenn die Figur auf dieser Route so weit gekommen ist
+const ROUTE_TARGET_STOP = 3.0 # m: so weit vor einem Monster / Sammelpunkt aus einem Quest-Ziel-Link anhalten (Z3)
 const GATHER_MOVE = 0.3 # m: weiter bewegt = Sammeln abgebrochen
 const CAST_MOVE = 0.3 # m: waagrecht weiter bewegt = Zaubern abbrechen (skill_cancel)
 const SKILL_CHASE = 5 # so oft läuft die Figur einem weiterziehenden Ziel nach, dann fragt sie den Server
@@ -100,6 +117,7 @@ const COLOR_CRIT = Color(1.0, 0.85, 0.2)
 const COLOR_HURT = Color(1.0, 0.3, 0.25)
 const COLOR_HEAL = Color(0.35, 1.0, 0.35)
 const BUFF_GFX_CHECK = 1.0 # s: GFX der Effekte nach neu gebauten Modellen wieder anhängen
+const TOWN_CHECK = 2.0 # s: Name der nächsten Rückkehrstadt (Stadtportal-Text) nachführen
 const CHASE_FROM = 1.5 # m über der Reichweite: erst dann läuft die Figur nach (der Server schlägt bis
 # Reichweite + halbe Größe + 1 m zu, combat.gd RANGE_SLACK)
 const ATTACK_HOLD = 0.6 # s nach einem eigenen Treffer stehen bleiben
@@ -133,6 +151,7 @@ var quest_data: QuestData
 var item_data: ItemData
 var attack_fx: AttackFx # Angriffs-Effekte: Flug- und Treffer-GFX, Wirkung beim Einschlag
 var gathering = {} # laufendes Sammeln: {id, end, time, desc, pos}
+var using = {} # laufendes Benutzen eines Gegenstands (Z5): {slot, end, time, desc, pos}
 var attacking = 0 # Monster des laufenden Normalangriffs
 var attack_range = 4.0
 var _attack_hold = 0 # ms: bis dahin nicht nachlaufen
@@ -160,6 +179,8 @@ var _radar_t = 0.0
 var _quest_thread: Thread
 var _skill_thread: Thread
 var _buff_thread: Thread
+var _desc_thread: Thread
+var _item_desc = null # Plugin Data/angelica_itemdesc.gd (geht nach dem Laden an item_data.desc)
 var buff_data = null # Plugin Data/angelica_buffs.gd: Art, Symbol, Text, GFX der Statuseffekte
 var skill_data = null # Plugin Data/angelica_skills.gd: Namen, Beschreibungen (Lua), Symbole der Fertigkeiten
 var _skills_state = {} # world_ready skills (für einen neu gebauten HUD)
@@ -168,16 +189,22 @@ var cooldowns = {} # ID -> [Ende ms, Dauer ms] (gemeinsam mit hud.gd)
 var casting = {} # eigenes Zaubern: {id, time, end, name, target, pos, cancel_sent}; {pending} wartet auf Antwort
 var _casts = {} # Figuren-ID -> {act, start}: Aktion der letzten Fertigkeit (Treffer-Effekte)
 var buffs = {} # Figuren- / Monster-ID -> [[Effekt, Stapel, Ende ms (0 = ohne Ende), Dauer ms, light]] (Statuseffekte)
+var seals = {} # eigene Siegel (Meldung seal): root, silent, melee, idle, diet, disarm, invincible -> bool
 var _buff_gfx = {} # Figuren- / Monster-ID -> {model: Instanz-ID des Modells, nodes: {light: Node3D}}
 var _buff_gfx_t = 0.0
+var towns: Array = [] # Stadtpunkte der Welt (world_ready towns, Vector3): Stadtportal / Wiederbeleben zum nächsten
+var precinct = null # Plugin Data/angelica_precinct.gd: Gebiete der Map (Name der Rückkehrstadt)
+var _town_t = 0.0
 var _pending_talk = 0 # NPC, zu dem die Figur zum Ansprechen läuft
 var _icons = {} # Name des Quest-Symbols -> AtlasTexture
 var movemap # angelica_movemap.gd, null = Map ohne Wegekarte (Autoroute geradeaus)
 var route = {} # laufende Autoroute: goal, label, tid, npc, stop, exact, replans
+var blocked_cells = 0 # Felder der Wegekarte, die festgesteckte Routen gesperrt haben (_block_ahead)
 var _route_next = {} # Anfrage, die auf das Ende der laufenden Suche wartet
 var _route_thread: Thread
 var _movemap_thread: Thread
 var _buildings: StaticBody3D # Gebäude-Kollision (für die Geländehöhe ausgenommen)
+var collision_info = {} # Herkunft der Gebäude-Kollision: {source ("Gebäude" / "map.bht"), buildings, hulls, errors}
 
 
 func start(p_login, p_info: Dictionary) -> void:
@@ -219,8 +246,14 @@ func start(p_login, p_info: Dictionary) -> void:
 		_my_death.call_deferred()
 	if quest_data != null:
 		quest_data.set_state(r["data"].get("quests", {}))
+	towns = r["data"].get("towns", []).filter(func(t): return t is Array and t.size() == 3).map(func(t): return Vector3(t[0], t[1], t[2]))
 	_skills_state = r["data"].get("skills", {})
 	if skill_data != null:
+		precinct = load(PRECINCT).new()
+		var perr = precinct.read(skill_data.files, map_name)
+		if perr != "":
+			warnings.append(perr)
+		_update_town()
 		for e in _skills_state.get("skills", []):
 			skill_data.skill_class[int(e[0])] = int(info["char"]["class"]) # Symbol der eigenen Klasse
 	skill_info.merge(_skills_state.get("info", {}), true)
@@ -291,6 +324,11 @@ func _load() -> String:
 		buff_data = load(BUFF_DATA).new(load(FILES).new(str(login.settings.value("data_root"))), login.language)
 		_buff_thread = Thread.new()
 		_buff_thread.start(buff_data.open)
+	# Gegenstands-Beschreibungen: Lua-Skripte itemdesc + global_string, item_ext_desc.txt (~0,2 s) ebenso
+	if ResourceLoader.exists(ITEM_DESC):
+		_item_desc = load(ITEM_DESC).new(load(FILES).new(str(login.settings.value("data_root"))), login.language)
+		_desc_thread = Thread.new()
+		_desc_thread.start(_item_desc.open)
 	# Wegekarte der Autoroute ebenso (~0,2 s)
 	movemap = load(MOVEMAP).new()
 	_movemap_thread = Thread.new()
@@ -302,22 +340,25 @@ func _load() -> String:
 	await get_tree().process_frame
 	_add_terrain_collision()
 	_progress(0.7)
-	# Gebäude-Kollision im Thread (Lesen und Zerlegen der Brushes dauert ~1,5 s)
-	var bht = _bht_path()
-	if bht != "":
-		_thread = Thread.new()
-		_thread.start(_brush_faces.bind(bht, load(BRUSHES)))
-		while _thread.is_alive():
-			await get_tree().process_frame
-		var faces: PackedVector3Array = _thread.wait_to_finish()
-		_thread = null
-		if not faces.is_empty():
-			var shape = ConcavePolygonShape3D.new()
-			shape.backface_collision = true
-			shape.set_faces(faces)
-			_buildings = _add_static("Gebaeude-Kollision", shape)
+	# Gebäude-Kollision im Thread (Hüllen der Gebäude lesen und zerlegen dauert ~1,5 s)
+	_thread = Thread.new()
+	_thread.start(_building_faces.bind(str(login.settings.value("data_root")), _bht_path()))
+	while _thread.is_alive():
+		await get_tree().process_frame
+	var coll: Dictionary = _thread.wait_to_finish()
+	_thread = null
+	collision_info = coll.duplicate()
+	collision_info.erase("faces")
+	for e in (coll["errors"] as Array).slice(0, 3):
+		warnings.append("Gebäude-Kollision: " + str(e))
+	var faces: PackedVector3Array = coll["faces"]
+	if not faces.is_empty():
+		var shape = ConcavePolygonShape3D.new()
+		shape.backface_collision = true
+		shape.set_faces(faces)
+		_buildings = _add_static("Gebaeude-Kollision", shape)
 	else:
-		warnings.append("keine map.bht für " + map_name)
+		warnings.append("keine Gebäude-Kollision für " + map_name)
 	_progress(0.8)
 	await get_tree().process_frame
 	npc_data = NpcData.new()
@@ -390,6 +431,18 @@ func _load() -> String:
 		else:
 			for e in buff_data.errors:
 				warnings.append("Statuseffekte: " + e)
+	if _desc_thread != null:
+		while _desc_thread.is_alive():
+			await get_tree().process_frame
+		var derr = _desc_thread.wait_to_finish()
+		_desc_thread = null
+		if derr != "":
+			warnings.append("Gegenstands-Beschreibungen: " + derr)
+			_item_desc.close()
+			_item_desc = null
+		for e in (_item_desc.errors if _item_desc != null else []):
+			warnings.append("Gegenstands-Beschreibungen: " + str(e))
+		item_data.desc = _item_desc
 	quest_data.elements = npc_data.elements
 	quest_data.player = {"name": c["name"], "level": int(c.get("level", 1)), "race": int(c["race"]),
 		"class": int(c["class"]), "gender": int(c["gender"])}
@@ -417,6 +470,7 @@ func _make_hud() -> void:
 	hud.target_requested.connect(select_target)
 	hud.npc_option.connect(_on_npc_option)
 	hud.quest_abandon_requested.connect(_abandon)
+	hud.award_task_requested.connect(_award_task)
 	hud.quest_entries = func(): return quest_data.log_entries(func(tid): return npc_data.info(tid)["name"], hud.texts()) if quest_data != null and quest_data.tasks != null else []
 	hud.npc_closed.connect(func(): talk_npc = 0)
 	hud.items = item_data
@@ -424,18 +478,24 @@ func _make_hud() -> void:
 		"gender": int(c["gender"]), "appearance": c.get("appearance", {})}
 	hud.equip_models = func(e: Dictionary): return equip_models(e, int(c["race"]), int(c["class"]), int(c["gender"]))
 	hud.equip_requested.connect(_equip)
+	hud.use_requested.connect(_use_bag)
+	hud.destroy_requested.connect(_destroy)
 	hud.unequip_requested.connect(_unequip)
 	hud.move_item_requested.connect(_move_item)
 	hud.pos_route_requested.connect(_route_pos)
+	hud.target_route_requested.connect(_route_target)
 	hud.revive_requested.connect(_revive)
 	hud.skills = skill_data
 	hud.buffs = buff_data
+	hud.seals = seals
 	hud.set_buffs(buffs.get(my_id, []))
 	hud.shortcut_requested.connect(_set_shortcut)
 	hud.skills_seen_requested.connect(_skills_seen)
 	hud.skill_info = skill_info
 	hud.cooldowns = cooldowns
 	hud.skill_use_requested.connect(use_skill)
+	hud.skill_learn_requested.connect(_learn_skill)
+	hud.basic_action_requested.connect(_basic_action)
 	if not _skills_state.is_empty():
 		hud.set_skills(_skills_state)
 	hud.route_npc_requested.connect(route_npc)
@@ -444,6 +504,10 @@ func _make_hud() -> void:
 	if quest_data != null:
 		quest_data.set_ui(hud.aui)
 		quest_data.item_count = _bag_count
+		quest_data.my_buffs = func(): return hud.my_buffs if hud != null else [] # Effekt-Bedingungen (m_PremBuff)
+		quest_data.money_text = func(copper): return hud.money_text(copper) if hud != null else str(copper)
+		hud.award_state = quest_data.award_state # Shylias Markt (Z5)
+		hud.item_count = _bag_count
 		hud.quest_text = quest_data.format_text
 		for w in quest_data.warnings:
 			warnings.append("Quests: " + w)
@@ -529,15 +593,21 @@ func _bht_path() -> String:
 	var p = spawns.server_dir().path_join("data").path_join(src[0]["folder"]).path_join("map.bht")
 	return p if FileAccess.file_exists(p) else ""
 
-# im Thread: Brushes lesen und als Dreiecke
-func _brush_faces(path: String, brushes_script: Script) -> PackedVector3Array:
-	var br = brushes_script.new()
-	if br.read(path) != "":
-		return PackedVector3Array()
+# im Thread: Kollision der Gebäude aus ihren Hüllen (wie das Original); ohne Gebäude-Liste die map.bht des Servers ->
+# {faces, buildings, hulls, errors, source}
+func _building_faces(data_root: String, bht: String) -> Dictionary:
+	var bld = load(BUILDINGS).new(load(IMPORTER).new(data_root))
+	var r: Dictionary = bld.collision_faces(map_name)
+	r["source"] = "Gebäude"
+	if not (r["faces"] as PackedVector3Array).is_empty() or bht == "":
+		return r
+	var br = load(BRUSHES).new()
+	if br.read(bht) != "":
+		return r
 	var faces = PackedVector3Array()
 	for b in br.brushes:
 		faces.append_array(br.triangles(b))
-	return faces
+	return {"faces": faces, "buildings": 0, "hulls": br.brushes.size(), "errors": r["errors"], "source": "map.bht"}
 
 
 # ====================================================
@@ -546,7 +616,7 @@ func _brush_faces(path: String, brushes_script: Script) -> PackedVector3Array:
 func _physics_process(delta: float) -> void:
 	if not ready_in_world or player == null:
 		return
-	player.input_enabled = not _leaving and not player.dead and (hud == null or not hud.chat_focused())
+	player.input_enabled = not _leaving and not player.dead and (hud == null or not hud.text_focused())
 	_check_talk()
 	_send_t += delta
 	if _send_t < 1.0 / Proto.MOVE_RATE:
@@ -602,6 +672,8 @@ func _on_pushed(what: String, data: Dictionary) -> void:
 			_set_inventory(data)
 		"gather_end":
 			_gather_end(data)
+		"use_end":
+			_use_end(data)
 		"player_equip":
 			var re = remotes.get(int(data.get("id", 0)))
 			if re != null:
@@ -617,6 +689,8 @@ func _on_pushed(what: String, data: Dictionary) -> void:
 		"kill":
 			if hud != null and int(data.get("exp", 0)) > 0:
 				hud.add_info(hud.texts()["gain_exp"] % int(data["exp"]))
+			if hud != null and int(data.get("bind", 0)) > 0:
+				hud.add_info(hud.texts()["gain_bind"] % hud.money_text(int(data["bind"])))
 		"die":
 			var who = int(data.get("id", 0))
 			if who == my_id:
@@ -636,6 +710,10 @@ func _on_pushed(what: String, data: Dictionary) -> void:
 				rv.revive(Vector3(rp[0], rp[1], rp[2]))
 		"stats":
 			_set_stats(data)
+		"seal":
+			_set_seals(data)
+		"skill_move":
+			_skill_move(data)
 		"skill_start":
 			_other_skill(data)
 		"skill_end":
@@ -643,6 +721,18 @@ func _on_pushed(what: String, data: Dictionary) -> void:
 		"cooldown":
 			if hud != null:
 				hud.set_cooldown(int(data.get("id", 0)), int(data.get("ms", 0)))
+		"skill_switch":
+			if hud != null:
+				hud.set_switched(int(data.get("id", 0)), data.get("on", false))
+		"skill_catalog":
+			if hud != null:
+				hud.set_catalog(data.get("list", []))
+				_skills_state = _skills_export()
+		"skill_forget":
+			skill_info.erase(str(int(data.get("id", 0))))
+			if hud != null:
+				hud.remove_skill(int(data.get("id", 0)))
+				_skills_state = _skills_export()
 		"skill_info":
 			skill_info[str(int(data.get("id", 0)))] = data.get("info", {})
 			_add_skill_actions()
@@ -729,11 +819,16 @@ func _process(delta: float) -> void:
 	_radar_t += delta
 	if ready_in_world and hud != null and player != null:
 		_update_gather()
+		_update_use()
 		_update_attack()
 		_update_cast()
 	if ready_in_world and hud != null and player != null and _radar_t >= 1.0 / RADAR_RATE:
 		_radar_t = 0.0
 		_update_radar()
+	_town_t += delta
+	if _town_t >= TOWN_CHECK:
+		_town_t = 0.0
+		_update_town()
 	_buff_gfx_t += delta
 	if _buff_gfx_t >= BUFF_GFX_CHECK:
 		_buff_gfx_t = 0.0
@@ -967,7 +1062,8 @@ func _load_movemap(files_script: Script, data_root: String) -> String:
 func route_to(goal: Vector3, label: String, tid: int = 0, stop: float = 0.0, npc: int = 0, exact: bool = false) -> void:
 	if player == null:
 		return
-	var req = {"goal": goal, "label": label, "tid": tid, "npc": npc, "stop": stop, "exact": exact or npc != 0, "replans": 0}
+	var req = {"goal": goal, "label": label, "tid": tid, "npc": npc, "stop": stop, "exact": exact or npc != 0, "replans": 0,
+		"from": player.global_position}
 	if _route_thread != null:
 		_route_next = req
 		return
@@ -1066,6 +1162,7 @@ func _on_route_finished(arrived: bool) -> void:
 func _on_route_stuck() -> void:
 	if route.is_empty() or _route_thread != null:
 		return
+	_block_ahead()
 	if int(route["replans"]) >= ROUTE_REPLANS:
 		if hud != null:
 			hud.add_system(hud.texts()["route_stuck"])
@@ -1074,6 +1171,23 @@ func _on_route_stuck() -> void:
 	var req = route.duplicate()
 	req["replans"] = int(req["replans"]) + 1
 	_search(req)
+
+# Steckt die Figur auf der Route fest (ein Hindernis, das die Wegekarte nicht kennt, z.B. ein Pfosten neuer Gebäude), die Felder
+# kurz vor ihr in Richtung des nächsten Wegpunkts sperren (movemap block_strip), damit die neue Suche außen herum führt - nur, wenn
+# sie seit dem Start der Route vorangekommen ist (kommt sie gar nicht los, liegt es nicht an einem Hindernis auf dem Weg, und
+# Sperren rings um sie würden den Start einschließen)
+func _block_ahead() -> void:
+	if movemap == null or player == null or not player.target is Vector3:
+		return
+	var p = player.global_position
+	var from: Vector3 = route.get("from", p)
+	if Vector2(p.x - from.x, p.z - from.z).length() < STUCK_BLOCK_PROGRESS:
+		return
+	var to: Vector3 = player.target
+	var g = _ground_y(p)
+	var c: Vector2i = movemap.cell_of(p.x, p.z)
+	var layer: int = movemap.which_layer(c, p.y - g) if not is_nan(g) else movemap.min_passable_layer(c)
+	blocked_cells += movemap.block_strip(p, Vector2(to.x - p.x, to.z - p.z), layer, STUCK_BLOCK_NEAR, STUCK_BLOCK_FAR, STUCK_BLOCK_HALF)
 
 # NPC-Link (Vorlage tid): sichtbarer NPC -> hin und ansprechen; sonst sein Ort aus task_npc.data
 func route_npc(tid: int) -> void:
@@ -1105,6 +1219,29 @@ func _nearest_npc(tid: int) -> int:
 	return best
 
 # Koordinaten-Link (&pos:(x,y,z,Welt)Name&): Autoroute, wenn der Ort in dieser Welt liegt
+# Ziel-Link einer Quest (Z3): den Ort kennt nur der Server (Spawn-Daten) -> Anfrage quest_where, dann Autoroute bis
+# ROUTE_TARGET_STOP m vor das Monster bzw. den Sammelpunkt
+func _route_target(kind: String, id: int, quest: int) -> void:
+	var label = ""
+	if kind == "mon" and npc_data != null:
+		label = npc_data.display_name(npc_data.info(id), 0)
+	elif npc_data != null and npc_data.elements != null:
+		label = npc_data.elements.name_of(id)
+	label = Hud._plain(label if label != "" else str(id))
+	var r = await session.quest_where(kind, id, quest)
+	if hud == null or player == null:
+		return
+	if r["code"] != Proto.Code.OK:
+		hud.add_system(hud.texts()["route_unknown"] % label)
+		return
+	var p: Array = r["data"].get("pos", [])
+	if p.size() < 3:
+		return
+	if int(r["data"].get("world", 0)) != int(info.get("world", 0)):
+		hud.add_system(hud.texts()["route_far"] % label)
+		return
+	route_to(Vector3(p[0], p[1], p[2]), label, 0, ROUTE_TARGET_STOP, 0, true)
+
 func _route_pos(goal: Vector3, world_id: int, label: String) -> void:
 	if world_id != 0 and world_id != int(info.get("world", 0)):
 		hud.add_system(hud.texts()["route_far"] % label)
@@ -1194,6 +1331,32 @@ func _build_remote(r) -> Array:
 	var height = maxf(1.0, factory.bounds().size.y)
 	return [factory.detach(), height]
 
+# Rechtsklick auf einen Taschenplatz: Quest-Würfel benutzen, Ausrüstung anlegen; anderes (Material, Quest-Gegenstände,
+# Sammel-Werkzeuge wie die Fackeln) hat keine Rechtsklick-Wirkung - Werkzeuge nimmt das Sammeln selbst aus der Tasche
+func _use_bag(pos: int) -> void:
+	var e = hud.inventory["bag"].get(pos) if hud != null else null
+	if e == null or item_data == null:
+		return
+	var i: Dictionary = item_data.info(int(e[0]))
+	if i.get("use", false):
+		_use_item(pos)
+	elif i.get("equip", false) and int(i.get("mask", 0)) != 0:
+		_equip(pos)
+
+# Zerstören (hud.gd hat schon gefragt): ganzer Stapel; Meldung DESTROY_ITEM ("%d %s zerstört") der Spieldaten
+func _destroy(pos: int, id: int) -> void:
+	var e = hud.inventory["bag"].get(pos) if hud != null else null
+	var n = int(e[1]) if e != null else 1
+	var r = await session.item_destroy(pos, id)
+	if hud == null:
+		return
+	if r["code"] != Proto.Code.OK:
+		hud.add_system(Proto.text(r["code"], login.language))
+		return
+	var msg = hud.game_text("DESTROY_ITEM")
+	if msg.count("%") >= 2:
+		hud.add_info(Hud._plain(msg % [n, Hud._plain(item_data.info(id)["name"])]))
+
 func _equip(pos: int) -> void:
 	var r = await session.equip(pos)
 	if hud != null and r["code"] != Proto.Code.OK:
@@ -1251,6 +1414,40 @@ func _update_gather() -> void:
 	var left = float(gathering["end"] - Time.get_ticks_msec()) / 1000.0
 	hud.set_progress(gathering["desc"], 1.0 - clampf(left / float(gathering["time"]), 0.0, 1.0))
 
+# Gegenstand benutzen (Quest-Würfel wie der EXP-Cocktail): Leiste wie beim Sammeln, Bewegen bricht ab; die Wirkung
+# (EXP) meldet der Server als Quest-Belohnung
+func _use_item(pos: int) -> void:
+	if not using.is_empty() or not gathering.is_empty() or player.dead:
+		return
+	var r = await session.item_use(pos)
+	if hud == null:
+		return
+	if r["code"] != Proto.Code.OK:
+		hud.add_system(Proto.text(r["code"], login.language))
+		return
+	var secs = float(r["data"].get("time", 0))
+	if secs <= 0.0:
+		return
+	var desc = str(item_data.info(int(r["data"].get("id", 0))).get("use_desc", ""))
+	using = {"slot": pos, "time": secs, "end": Time.get_ticks_msec() + int(secs * 1000.0),
+		"desc": desc if desc != "" else hud.texts()["use"], "pos": player.global_position}
+	hud.set_progress(using["desc"], 0.0)
+
+func _update_use() -> void:
+	if using.is_empty():
+		return
+	if player.global_position.distance_to(using["pos"]) > GATHER_MOVE:
+		using = {}
+		hud.set_progress("", 0.0) # der Server bricht beim Bewegen selbst ab (use_end)
+		return
+	var left = float(using["end"] - Time.get_ticks_msec()) / 1000.0
+	hud.set_progress(using["desc"], 1.0 - clampf(left / float(using["time"]), 0.0, 1.0))
+
+func _use_end(_d: Dictionary) -> void:
+	using = {}
+	if hud != null and gathering.is_empty():
+		hud.set_progress("", 0.0)
+
 func _gather_end(d: Dictionary) -> void:
 	if hud == null:
 		return
@@ -1273,6 +1470,9 @@ func attack_target(id: int) -> void:
 	var n = npcs.get(id)
 	if n == null or player.dead:
 		return
+	if seals.get("melee", false):
+		hud.add_system(Proto.text(Proto.Code.ATTACK_SEALED, login.language))
+		return
 	var reach = _my_range()
 	if _flat_dist(n.global_position) <= reach:
 		_start_attack(id)
@@ -1290,6 +1490,28 @@ func _start_attack(id: int) -> void:
 	attacking = id
 	attack_range = float(r["data"].get("range", 4.0))
 	player.mark_fight() # Waffe ziehen (CECHPWorkTrace: SetIsFighting(true, 6000))
+
+# Ansturm (Meldung skill_move): die Figur läuft in time ms an pos
+func _skill_move(d: Dictionary) -> void:
+	var pos: Array = d.get("pos", [])
+	var n = _node_of(int(d.get("id", 0)))
+	if pos.size() != 3 or n == null:
+		return
+	var to = Vector3(pos[0], pos[1], pos[2])
+	if n == player:
+		player.dash(to, int(d.get("time", 0)) / 1000.0)
+	elif n.has_method("dash"):
+		n.dash(to, int(d.get("time", 0)) / 1000.0)
+
+# Siegel der eigenen Figur (Meldung seal): stehen bleiben, Normalangriff beenden, Symbole (hud.gd)
+func _set_seals(d: Dictionary) -> void:
+	seals = d.duplicate()
+	if player != null:
+		player.rooted = seals.get("root", false) # beendet im nächsten Bild Klickziel und Autoroute (route_finished)
+	if seals.get("melee", false):
+		attacking = 0 # der Server hat den Normalangriff beendet
+	if hud != null:
+		hud.seals = seals
 
 func stop_attack() -> void:
 	if attacking != 0:
@@ -1333,18 +1555,29 @@ func use_skill(id: int, tries: int = 0) -> void:
 		return
 	var i: Dictionary = skill_info.get(str(id), {})
 	var code = Proto.Code.OK
-	if i.is_empty() or not i.get("usable", false):
+	if i.get("switch", false) and hud.switched.has(id) and casting.is_empty():
+		_switch_off(id) # eingeschalteter Schalter: aus, ohne weitere Prüfungen (TrySwitchOff)
+		return
+	if i.get("passive", false):
+		code = Proto.Code.SKILL_PASSIVE
+	elif i.is_empty() or not i.get("usable", false):
 		code = Proto.Code.SKILL_NOT_YET
+	elif hud.skill_sealed(id):
+		code = Proto.Code.SKILL_SEALED
 	elif not casting.is_empty() or not gathering.is_empty():
 		code = Proto.Code.SKILL_BUSY
 	elif hud.cool_fraction(id) > 0.0:
 		code = Proto.Code.SKILL_COOLDOWN
 	elif not hud.mana_ok(id):
 		code = Proto.Code.NO_MANA
-	elif target_kind != "monster" or not npcs.has(target_id) or npcs[target_id].dead:
+	elif not i.get("bless", false) and (target_kind != "monster" or not npcs.has(target_id) or npcs[target_id].dead):
 		code = Proto.Code.NO_TARGET
 	if code != Proto.Code.OK:
 		hud.add_system(Proto.text(code, login.language))
+		return
+	if i.get("bless", false): # Stärkung: gewählter Spieler, sonst (kein Ziel, Monster, nur-selbst) die eigene Figur
+		var friend = target_kind == "player" and remotes.has(target_id) and not i.get("self", false)
+		_start_skill(id, target_id if friend else my_id)
 		return
 	var n = npcs[target_id]
 	var reach = maxf(1.0, float(i.get("cast", i.get("range", 4.0))))
@@ -1356,12 +1589,56 @@ func use_skill(id: int, tries: int = 0) -> void:
 		return
 	_start_skill(id, target_id)
 
+# Plus-Knopf im K-Fenster: nächste Stufe lernen (der Server meldet skill_level / skill_info / skill_catalog / stats).
+# Bezahlt wird mit Seelenmünzen; reichen sie nicht, fragt ein Meldungsfenster, ob Goldmünzen den Rest decken (Z4)
+func _learn_skill(id: int) -> void:
+	var r = await session.skill_learn(id)
+	if hud == null:
+		return
+	if r["code"] == Proto.Code.NOT_ENOUGH_BIND_MONEY:
+		var lack = int(r["data"].get("cost", 0)) - int(r["data"].get("bind", 0))
+		if hud.aui.has_message_box() or await hud.aui.message_box(hud.texts()["learn_ask"] % hud.money_text(lack),
+				Hud.AuiManager.MB_YESNO) != "IDYES" or hud == null:
+			return
+		r = await session.skill_learn(id, true)
+		if hud == null:
+			return
+	if r["code"] != Proto.Code.OK:
+		hud.add_system(Proto.text(r["code"], login.language))
+	elif skill_data != null:
+		hud.add_info(hud.texts()["skill_learned"] % [Hud._plain(skill_data.skill_name(id)), int(r["data"].get("level", 1))])
+
+# Grundaktion aus dem K-Fenster (Reiter Grundlagen)
+func _basic_action(action: String) -> void:
+	match action:
+		"attack":
+			if target_kind == "monster" and npcs.has(target_id) and not npcs[target_id].dead:
+				_start_attack(target_id)
+			else:
+				hud.add_system(Proto.text(Proto.Code.NO_TARGET, login.language))
+		"interrupt":
+			if not casting.is_empty():
+				session.skill_cancel()
+		_:
+			hud.add_system(hud.texts()["not_yet"])
+
+# Schalter ausschalten: der Server entfernt seine Effekte und meldet skill_switch (aus)
+func _switch_off(id: int) -> void:
+	casting = {"pending": id}
+	var r = await session.skill_cast(id, my_id, player.global_position)
+	casting = {}
+	if hud != null and r["code"] != Proto.Code.OK:
+		hud.add_system(Proto.text(r["code"], login.language))
+
 func _start_skill(id: int, tid: int) -> void:
-	var n = npcs.get(tid)
+	var n = _node_of(tid)
 	if n == null or player.dead or not casting.is_empty():
 		return
-	player.target = null
-	player.face(n.global_position)
+	var instant = skill_info.get(str(id), {}).get("instant", false)
+	if not instant:
+		player.target = null # Sofort-Fertigkeiten (z.B. Gebet) unterbrechen das Laufen nicht
+	if n != player:
+		player.face(n.global_position)
 	casting = {"pending": id}
 	var r = await session.skill_cast(id, tid, player.global_position)
 	if hud == null:
@@ -1370,16 +1647,19 @@ func _start_skill(id: int, tid: int) -> void:
 		casting = {}
 		hud.add_system(Proto.text(r["code"], login.language))
 		return
+	if r["data"].get("off", false): # war schon an (der Server hat ihn ausgeschaltet)
+		casting = {}
+		return
 	var i: Dictionary = skill_info.get(str(id), {})
 	var t = int(r["data"].get("time", i.get("time", 0)))
-	var act = str(i.get("act", ""))
+	var act = _weapon_act(str(i.get("act", "")))
 	casting = {"id": id, "time": t, "end": Time.get_ticks_msec() + t, "target": tid, "pos": player.global_position,
-		"name": Hud._plain(skill_data.skill_name(id)) if skill_data != null else str(id)}
+		"name": Hud._plain(skill_data.skill_name(id)) if skill_data != null else str(id), "act": act}
 	_casts[my_id] = {"act": act, "start": Time.get_ticks_msec()}
 	player.mark_fight()
 	var length = player.play_skill(act)
 	if attack_fx != null and attack_fx.importer != null:
-		attack_fx.play_events(player, player.model, act, length)
+		attack_fx.play_events(player, player.model, act, length, t / 1000.0 if act.contains("循环") else 0.0)
 	if t > 0:
 		hud.set_progress(casting["name"], 0.0)
 
@@ -1387,7 +1667,7 @@ func _start_skill(id: int, tid: int) -> void:
 func _update_cast() -> void:
 	if not casting.has("end"):
 		return
-	if not casting.get("cancel_sent", false) and _flat_dist(casting["pos"]) > CAST_MOVE:
+	if int(casting["time"]) > 0 and not casting.get("cancel_sent", false) and _flat_dist(casting["pos"]) > CAST_MOVE:
 		casting["cancel_sent"] = true
 		session.skill_cancel()
 	if int(casting["time"]) > 0:
@@ -1398,8 +1678,11 @@ func _update_cast() -> void:
 func _skill_end(d: Dictionary) -> void:
 	if int(d.get("src", 0)) != my_id:
 		var r = remotes.get(int(d.get("src", 0)))
-		if r != null and not d.get("ok", false):
-			r._once = ""
+		var looped = str(_casts.get(int(d.get("src", 0)), {}).get("act", "")).contains("循环")
+		if r != null and (not d.get("ok", false) or looped):
+			r.stop_once() # abgebrochen bzw. Schleifen-Aktion (Stadtportal) zu Ende
+			if attack_fx != null:
+				attack_fx.stop_events(r)
 		return
 	var was = casting
 	casting = {}
@@ -1408,8 +1691,14 @@ func _skill_end(d: Dictionary) -> void:
 	hud.set_progress("", 0.0)
 	if not d.get("ok", false):
 		player.stop_once()
+		if attack_fx != null:
+			attack_fx.stop_events(player)
 		hud.add_system(hud.texts()["skill_stopped"])
 		return
+	if str(was.get("act", "")).contains("循环"):
+		player.stop_once() # Schleifen-Aktion (Stadtportal) endet mit dem Zaubern
+		if attack_fx != null:
+			attack_fx.stop_events(player)
 	var tid = int(was.get("target", 0))
 	if skill_info.get(str(was.get("id", 0)), {}).get("auto", false) and attacking == 0 and npcs.has(tid) and not npcs[tid].dead:
 		_start_attack(tid) # AUTOATTACK_ACTIVATE: danach Normalangriff
@@ -1418,19 +1707,32 @@ func _skill_end(d: Dictionary) -> void:
 func _other_skill(d: Dictionary) -> void:
 	var src = int(d.get("src", 0))
 	var act = str(d.get("act", ""))
-	_casts[src] = {"act": act, "start": Time.get_ticks_msec()}
 	var r = remotes.get(src)
 	if r == null or r.model == null:
+		_casts[src] = {"act": act, "start": Time.get_ticks_msec()}
 		return
+	if factory != null and r.anim != null:
+		factory.add_actions(r.model, _act_variants(act, r.suffix)) # baut nur die fehlenden
+	act = _weapon_act(act, r)
+	_casts[src] = {"act": act, "start": Time.get_ticks_msec()}
 	var dst = _node_of(int(d.get("dst", 0)))
 	if dst != null:
 		r.face(dst.global_position)
 	r.mark_fight()
-	if factory != null and r.anim != null and not r.anim.has_animation(act):
-		factory.add_actions(r.model, [act])
 	var length = r.play_skill(act)
 	if attack_fx != null and attack_fx.importer != null:
-		attack_fx.play_events(r, r.model, act, length)
+		attack_fx.play_events(r, r.model, act, length, int(d.get("time", 0)) / 1000.0 if act.contains("循环") else 0.0)
+
+# Name der Rückkehrstadt für die Fertigkeiten-Texte (GameApi.GetHostTownName im Stadtportal): das Gebiet
+# (precinct.clt) am nächsten Stadtpunkt der Welt, wie der Server ihn für Stadtportal und Wiederbeleben wählt
+func _update_town() -> void:
+	if skill_data == null or precinct == null or player == null or towns.is_empty():
+		return
+	var best: Vector3 = towns[0]
+	for t in towns:
+		if (t as Vector3).distance_to(player.global_position) < best.distance_to(player.global_position):
+			best = t
+	skill_data.host_town = precinct.name_at(best.x, best.z)
 
 # Aktionen der bekannten Fertigkeiten an die eigene Figur (fehlen nach jedem Neubau)
 func _add_skill_actions() -> void:
@@ -1441,8 +1743,35 @@ func _add_skill_actions() -> void:
 		var a = str(skill_info[k].get("act", ""))
 		if a != "" and not a in acts:
 			acts.append(a)
+	for a in acts.duplicate():
+		for v in _act_variants(a, player.suffix):
+			if not v in acts:
+				acts.append(v)
 	if factory.add_actions(player.model, acts) > 0 and attack_fx != null and attack_fx.importer != null:
 		attack_fx.prewarm(player.model, acts)
+
+# Eine Aktion ohne Waffe (_空手) gibt es je Waffenart (kombinierte Aktionen der .ecm, z.B. 回城循环_巨剑 mit eigenem
+# GFX und Klang): [Variante der Waffe, die genannte, die allgemeine (_通用)]; sonst nur die genannte
+static func _act_variants(act: String, suffix: String) -> Array:
+	if not act.ends_with("_空手"):
+		return [act]
+	var base = act.trim_suffix("_空手")
+	var out = []
+	for a in [base + "_" + suffix, act, base + "_通用"]:
+		if not a in out:
+			out.append(a)
+	return out
+
+# Aktion in der Variante der Waffe (回城循环_空手 -> 回城循环_巨剑), sonst die genannte, sonst die allgemeine (_通用),
+# je nachdem, welche das Modell hat; fig = die eigene Figur (Standard) oder eine andere
+func _weapon_act(act: String, fig = null) -> String:
+	var f = fig if fig != null else player
+	if f == null or f.anim == null:
+		return act
+	for a in _act_variants(act, str(f.suffix)):
+		if f.anim.has_animation(a):
+			return a
+	return act
 
 func _node_of(id: int) -> Node3D:
 	if id == my_id:
@@ -1458,7 +1787,7 @@ func _on_hit(d: Dictionary) -> void:
 		if dst != null:
 			_hit_result(d, dst)
 		return
-	for n in [src, dst]: # Spieler: Waffen in die Hand (Kampfzustand)
+	for n in ([src] if d.get("bless", false) else [src, dst]): # Spieler: Waffen in die Hand (Kampfzustand)
 		if n != null and n.has_method("mark_fight"):
 			n.mark_fight()
 	var action = ""
@@ -1561,11 +1890,14 @@ func _update_buff_gfx(id: int) -> void:
 
 # Wirkung eines Treffers beim Einschlag (attack_fx.gd): Zahl, Treffer-Aktion, Leben
 func _hit_result(d: Dictionary, dst) -> void:
-	if hud == null or not is_instance_valid(dst):
-		return
-	var text = hud.texts()["miss"] if d.get("miss", false) else str(int(d.get("dmg", 0)))
+	if hud == null or not is_instance_valid(dst) or d.get("bless", false):
+		return # Stärkung: nur das Treffer-GFX (die Heilung kommt als heal)
+	var text = hud.texts()["miss"] if d.get("miss", false) else (hud.texts()["immune"] if d.get("immune", false) else str(int(d.get("dmg", 0))))
+	if d.get("nodmg", false) and not d.get("miss", false):
+		text = "" # Fluch ohne Schaden: keine Zahl
 	var color = COLOR_HURT if dst == player else (COLOR_CRIT if d.get("crit", false) else COLOR_DAMAGE)
-	_float_text(dst, text + ("!" if d.get("crit", false) else ""), color, d.get("crit", false))
+	if text != "":
+		_float_text(dst, text + ("!" if d.get("crit", false) else ""), color, d.get("crit", false))
 	if dst == player:
 		hud.set_stats({"hp": int(d.get("hp", 0)), "max_hp": int(d.get("max_hp", 1))})
 		info["hp"] = int(d.get("hp", 0))
@@ -1601,8 +1933,9 @@ func _my_death() -> void:
 	stop_attack()
 	cancel_route()
 	attacking = 0
-	if not gathering.is_empty():
+	if not gathering.is_empty() or not using.is_empty():
 		gathering = {}
+		using = {}
 		hud.set_progress("", 0.0)
 	player.die()
 	if hud != null:
@@ -1636,6 +1969,14 @@ func _on_npc_option(command: int, task: int) -> void:
 		hud.add_system(Proto.text(r["code"], login.language))
 
 # "Aufgeben" im Quest-Fenster
+# Shylias Markt: Fenster-Quest ohne NPC annehmen (Essenz-Tausch, Geschenke; die Belohnung meldet quest_event)
+func _award_task(id: int) -> void:
+	if id == 0:
+		return
+	var r = await session.quest_accept(0, id)
+	if hud != null and r["code"] != Proto.Code.OK:
+		hud.add_system(Proto.text(r["code"], login.language))
+
 func _abandon(id: int) -> void:
 	var r = await session.quest_abandon(id)
 	if hud != null and r["code"] != Proto.Code.OK:
@@ -1647,6 +1988,7 @@ func _refresh_quests() -> void:
 		return
 	hud.set_trace(quest_data.trace(func(tid): return npc_data.info(tid)["name"]))
 	hud.refresh_quests()
+	hud.refresh_lvup() # Shylias Markt: Knöpfe nach Quest-Zustand
 	for n in npcs.values():
 		if npc_data.info(n.tid)["npc"]:
 			n.set_quest_icon(_icon(quest_data.head_icon(n.tid)))
@@ -1678,7 +2020,9 @@ func _quest_event(d: Dictionary) -> void:
 	if int(d.get("exp", 0)) != 0:
 		hud.add_info(tx["gain_exp"] % int(d["exp"]))
 	if int(d.get("gold", 0)) != 0:
-		hud.add_info(tx["gain_gold"] % int(d["gold"]))
+		hud.add_info(tx["gain_gold"] % hud.money_text(int(d["gold"])))
+	if int(d.get("bind", 0)) != 0:
+		hud.add_info(tx["gain_bind"] % hud.money_text(int(d["bind"])))
 	for it in d.get("items", []):
 		var item_name = npc_data.elements.name_of(int(it[0])) if npc_data.elements != null else str(it[0])
 		hud.add_info(tx["gain_item"] % [Hud._plain(item_name), int(it[1])])
@@ -1712,11 +2056,16 @@ func _skills_export() -> Dictionary:
 	var sk = []
 	for id in st["skills"]:
 		sk.append([id, st["skills"][id]])
-	return {"skills": sk, "new": st["new"].duplicate(), "shortcuts": sc}
+	var cat = []
+	for id in hud.catalog:
+		var c: Dictionary = hud.catalog[id]
+		cat.append([id, c["next"], c["req"], c["cost"], c["max"], c["type"], c["use"], c["first"]])
+	var race = hud.race_list.map(func(id): return [id, int(hud.race_info.get(id, {}).get("type", 2)), int(hud.race_info.get(id, {}).get("use", 2))])
+	return {"skills": sk, "new": st["new"].duplicate(), "shortcuts": sc, "switched": hud.switched.keys(), "catalog": cat, "race": race}
 
 func _set_stats(d: Dictionary) -> void:
 	var old_level = int(info["char"].get("level", 1))
-	for k in ["exp", "exp_next", "hp", "max_hp", "mp", "max_mp", "money"]:
+	for k in ["exp", "exp_next", "hp", "max_hp", "mp", "max_mp", "money", "bind_money"]:
 		if d.has(k):
 			info[k] = d[k]
 	if d.has("level"):
@@ -1747,7 +2096,7 @@ func _say(text: String) -> void:
 func _input(event: InputEvent) -> void:
 	var k = event as InputEventKey
 	if k != null and k.pressed and not k.echo and k.keycode == KEY_TAB and ready_in_world and not aui.has_message_box() \
-			and (hud == null or not hud.chat_focused()):
+			and (hud == null or not hud.text_focused()):
 		get_viewport().set_input_as_handled()
 		tab_target()
 
@@ -1804,6 +2153,10 @@ func _exit_tree() -> void:
 		_skill_thread.wait_to_finish()
 	if _buff_thread != null and _buff_thread.is_started():
 		_buff_thread.wait_to_finish()
+	if _desc_thread != null and _desc_thread.is_started():
+		_desc_thread.wait_to_finish()
+	if _item_desc != null:
+		_item_desc.close()
 	if skill_data != null:
 		skill_data.close() # Lua-Tabellen und -Funktionen halten sich sonst gegenseitig fest
 	for t in [_movemap_thread, _route_thread]:

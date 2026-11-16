@@ -7,7 +7,10 @@ extends RefCounted
 # (A3DLitModel::Load 0x10000002): Skalierung, Richtung, Oben, Position und die Meshes
 # (A3DLitMesh::Load 0x10000002 - 0x10000006): Name, Textur, Vertices (Position, Farbe, UV),
 # WORD-Indizes, Normalen, Vertexfarben Tag / Nacht (vorberechnetes Licht), AABB, Material
-# (2Sided). Danach folgen Kollisionsdaten (nicht genutzt).
+# (2Sided). Danach die Kollisions-Hüllen (CELBrushBuilding::Load): Anzahl, je Hülle die Liste ihrer Meshes, dann je Hülle
+# ein CCDBrush (Format wie die map.bht des Servers, Server/brushes.gd read_brush) in Welt-Koordinaten der Map - daraus baut
+# das Original die Kollision der Gebäude (CECOrnament / CECBrushMan), auch für Gebäude "nur Kollision". read_hulls liest
+# nur diese (Meshes übersprungen, ohne die Vertices zu lesen).
 # Nur die Gebäude, die die Map nennt (.ecbsd, angelica_world.gd), wie im Spiel; ohne Szenen-Datei
 # alle im Ordner.
 # Jedes Gebäude trägt seine Weltlage selbst (A3DLitModel::UpdateAbsoluteTM):
@@ -19,6 +22,7 @@ extends RefCounted
 # ====================================================
 
 const SHADER = preload("../ECM/angelica_litmodel.gdshader")
+const Brushes = preload("../Server/brushes.gd")
 const SHADER_2SIDED = preload("../ECM/angelica_litmodel_2s.gdshader")
 const BUILDING_FLAGS_VERSION = 0x80000001
 const MESH_VERSIONS = [0x10000002, 0x10000003, 0x10000004, 0x10000005, 0x10000006, 0x10000100]
@@ -74,6 +78,99 @@ func read_bmd(path: String) -> Dictionary:
 		meshes.append(m)
 	out["meshes"] = meshes
 	return out
+
+# Kollision der Gebäude einer Map wie CECOrnament / CECBrushMan: die Hüllen aller Gebäude, die die Map nennt (.ecbsd, auch
+# "nur Kollision", z.B. die Höhlenwände von s11), als Dreiecke (Server/brushes.gd triangles, beide Seiten nutzen) ->
+# {faces: PackedVector3Array, buildings, hulls, errors: []}. Ohne Gebäude-Liste: faces leer (Aufrufer nimmt die map.bht)
+func collision_faces(map_name: String) -> Dictionary:
+	var out = {"faces": PackedVector3Array(), "buildings": 0, "hulls": 0, "errors": []}
+	var trn = importer.find_game_file("maps/%s/%s.trn2" % [map_name, map_name])
+	var dir = importer.find_game_dir("litmodels/" + map_name)
+	if trn == "" or dir == "":
+		out["errors"].append("maps/%s oder litmodels/%s fehlt" % [map_name, map_name])
+		return out
+	var world = load(get_script().resource_path.get_base_dir().path_join("angelica_world.gd")).new(importer)
+	var list = world.building_files(trn)
+	if list == null:
+		out["errors"].append(map_name + ": keine Gebäude-Liste (.ecwld / .ecbsd)")
+		return out
+	for rel in list:
+		var h = read_hulls(dir.path_join(str(rel).replace("\\", "/")))
+		if h is Dictionary:
+			out["errors"].append(h["error"])
+			continue
+		out["buildings"] += 1
+		out["hulls"] += h.size()
+		for br in h:
+			out["faces"].append_array(Brushes.triangles(br))
+	return out
+
+# Kollisions-Hüllen eines Gebäudes -> [Brush] (Server/brushes.gd Form; leer ohne Hüllen) oder {"error"}
+func read_hulls(path: String) -> Variant:
+	var b = importer.files.get_bytes(path)
+	return hulls_of(b, path.get_file())
+
+static func hulls_of(b: PackedByteArray, label: String = "") -> Variant:
+	if b.size() < 64 or b.slice(0, 4).get_string_from_ascii() != "MOXB":
+		return {"error": label + ": keine Gebäude-Datei"}
+	var p = 4
+	if b.decode_u32(p) >= BUILDING_FLAGS_VERSION:
+		p += 5
+	var ver = b.decode_u32(p)
+	if ver != 0x10000001 and ver != 0x10000002:
+		return {"error": label + ": LitModel-Version 0x%x wird nicht unterstützt" % ver}
+	p += 4 + 48
+	var n = b.decode_s32(p)
+	p += 4
+	for i in n:
+		p = _mesh_end(b, p)
+		if p < 0:
+			return {"error": label + ": Mesh %d nicht lesbar" % i}
+	if p + 4 > b.size():
+		return [] # alte Gebäude ohne Hüllen
+	var hulls = b.decode_s32(p)
+	p += 4
+	if hulls < 0 or hulls > 100000:
+		return {"error": label + ": %d Hüllen?" % hulls}
+	for i in hulls: # Meshes je Hülle (für das Ausblenden im Editor)
+		if p + 4 > b.size():
+			return {"error": label + ": Hüllen-Liste zu kurz"}
+		p += 4 + maxi(0, b.decode_s32(p)) * 4
+	var out = []
+	for i in hulls:
+		var r = Brushes.read_brush(b, p)
+		if r[0] == null:
+			return {"error": label + ": Hülle %d zu kurz" % i}
+		out.append(r[0])
+		p = r[1]
+	return out
+
+# Ende eines A3DLitMesh ab p ohne die Daten zu lesen (gleiche Rechnung wie _read_mesh), -1 bei Fehler
+static func _mesh_end(b: PackedByteArray, p: int) -> int:
+	if p + 336 > b.size():
+		return -1
+	var ver = b.decode_u32(p)
+	if not ver in MESH_VERSIONS:
+		return -1
+	var nv = b.decode_s32(p + 324)
+	var nf = b.decode_s32(p + 328)
+	p += 332
+	var extra = false
+	if ver == 0x10000006:
+		extra = b[p] != 0
+		p += 1
+	var vsize = 28 if ver <= 0x10000003 else 24
+	p += nv * vsize + nf * 6 + nv * 12 + (0 if ver == 0x10000002 else nv * 8) + (nv * 8 if extra else 0) + 48
+	if nv < 0 or nf < 0 or p > b.size():
+		return -1
+	if ver >= 0x10000005:
+		var e = b.find(0, p)
+		if e < 0 or e + 70 > b.size():
+			return -1
+		p = e + 1 + 64 + 4 + 1
+	if ver == MESH_LIGHTMAP_VERSION:
+		p += nv * 8
+	return p
 
 func _read_mesh(b: PackedByteArray, p: int) -> Dictionary:
 	if p + 336 > b.size():

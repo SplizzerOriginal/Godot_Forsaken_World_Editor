@@ -23,6 +23,8 @@ extends Node
 # inventory.gd (Plugin Server/item_templates.json). Kampf, Monster-KI, Tod und Wiederbeleben: combat.gd.
 # Fertigkeiten: bekannte und Schnellleisten skills.gd, Einsetzen skill_cast.gd (Plugin
 # Server/skill_templates.json, Formeln skill_expr.gd), Statuseffekte buffs.gd (Server/state_templates.json).
+# Testbefehle (debug_state: Effekt anlegen, debug_skill: Fertigkeit lernen) nur mit der Einstellung debug_commands
+# (--debug_commands, Testserver).
 # ====================================================
 
 const Proto = preload("../common/protocol.gd")
@@ -61,6 +63,7 @@ var inventory: Inventory
 var peer: ENetMultiplayerPeer
 var port = Proto.DEFAULT_PORT
 var dtls = false
+var debug_commands = false # Testbefehle erlauben (Einstellung debug_commands)
 var dir = "user://server"
 var log_file = ""
 var status_file = ""
@@ -95,6 +98,7 @@ func _ready() -> void:
 	_started = Time.get_datetime_string_from_system(false, true)
 	port = settings.value("port")
 	dtls = settings.value("dtls")
+	debug_commands = settings.value("debug_commands") == true
 	net = get_parent().get_node("Net")
 	_async_handlers = {"register": _register, "login": _login}
 	_handlers = {"hello": _hello, "ping": _ping, "logout": _logout,
@@ -102,8 +106,10 @@ func _ready() -> void:
 		"world_ready": _world_ready, "world_leave": _world_leave, "target": _target, "chat": _chat,
 		"quest_accept": _quest_accept, "quest_complete": _quest_complete, "quest_abandon": _quest_abandon,
 		"equip": _equip, "unequip": _unequip, "move_item": _move_item, "gather": _gather, "gather_cancel": _gather_cancel,
+		"item_use": _item_use, "item_destroy": _item_destroy,
 		"attack": _attack, "attack_stop": _attack_stop, "revive": _revive, "skill_seen": _skill_seen, "shortcut": _shortcut,
-		"skill_cast": _skill_cast, "skill_cancel": _skill_cancel}
+		"skill_cast": _skill_cast, "skill_cancel": _skill_cancel, "debug_state": _debug_state,
+		"debug_skill": _debug_skill, "skill_learn": _skill_learn, "debug_char": _debug_char, "quest_where": _quest_where}
 	log_line("%s startet (Port %d, Protokoll %d, Prozess %d)" % [SERVER_NAME, port, Proto.VERSION, OS.get_process_id()])
 	var err = _open_database()
 	if err == "":
@@ -133,11 +139,19 @@ func _ready() -> void:
 		combat.casting = casting
 		game_world.casting = casting
 		game_world.skills.info_of = casting.info
+		game_world.skills.on_learn = casting.apply_passive
+		game_world.skills.learn_factor = stats.learn_money_factor
+		game_world.skills.stats_push = combat._push_stats
+		quests.skills = game_world.skills
+		quests.on_level_up = func(pl): game_world.skills.auto_learn(_peer_of_player(pl), pl)
 		var buffs = Buffs.new(game_world, net, log_line)
 		buffs.combat = combat
 		buffs.stats_push = combat._push_stats
 		combat.buffs = buffs
 		casting.buffs = buffs
+		quests.buffs = buffs
+		buffs.on_gain = quests.auto_deliver # Quests mit Effekt-Bedingung (z.B. 6967 "Erste Begegnung")
+		buffs.casting = casting
 		game_world.buffs = buffs
 		var berr = buffs.load_templates()
 		if berr != "":
@@ -149,13 +163,14 @@ func _ready() -> void:
 			log_line("Fertigkeiten: %s - Einsetzen nicht möglich" % serr)
 		else:
 			log_line("Fertigkeiten: %d Vorlagen" % casting.templates.size())
+		game_world.skills.templates = casting.templates
 		game_world.templates = characters.templates
 		var qerr = quests.load_templates()
 		if qerr != "":
 			log_line("Quests: %s - keine Quests" % qerr)
 		else:
-			log_line("Quests: %d (%d automatisch vergebbar), %d NPCs vergeben, %d nehmen ab" % [quests.tasks.size(),
-				quests.auto_list.size(), quests.npc_out.size(), quests.npc_in.size()])
+			log_line("Quests: %d (%d automatisch vergebbar, %d geben versteckt Fertigkeiten), %d NPCs vergeben, %d nehmen ab" % [
+				quests.tasks.size(), quests.auto_list.size(), quests.grant_list.size(), quests.npc_out.size(), quests.npc_in.size()])
 			game_world.quests = quests
 		_load_world(settings.value("maps"))
 		err = _listen()
@@ -176,6 +191,8 @@ func _ready() -> void:
 	add_child(_ticker)
 	_load_at = Time.get_ticks_msec()
 	_load_logged = _load_at
+	if debug_commands:
+		log_line("Testbefehle erlaubt (debug_commands)")
 	log_line("Bereit, warte auf Spieler ...")
 	_write_status(true)
 
@@ -285,6 +302,7 @@ func _load_world(only: String) -> void:
 		if not templates.is_empty():
 			var nm = Npcs.new(map_name, templates, game_world.npc_ids)
 			nm.mine_templates = inventory.mines
+			nm.movemap = _movemap(dir, map_name)
 			nm.load_spawns(data, main["folder"], terrain, Time.get_ticks_msec() / 1000.0)
 			game_world.npc_maps[map_name] = nm
 			s["monsters"] = nm.counts["monsters"]
@@ -297,6 +315,19 @@ func _load_world(only: String) -> void:
 	log_line("Welt geladen in %.1f s: %d Maps, %d Monster, %d NPCs, %d Sammelpunkte (%d erzeugt); %d Vorlagen unbekannt; Höhen für %s" % [
 		(Time.get_ticks_msec() - t0) / 1000.0, world.size(), totals["monsters"], totals["npcs"], totals["res"], totals["mines"],
 		totals["unknown"], ", ".join(heights) if not heights.is_empty() else "keine Map"])
+
+# Wegekarte des Server-Ordners (Server/data/<Ordner>/movemaps, Kopie der Client-Wegekarte; server_files.py --client) oder null
+func _movemap(dir: String, map_name: String):
+	var mm_path = "res://addons/PWE-Manager/MAP/angelica_movemap.gd"
+	var files_path = "res://addons/PWE-Manager/Data/angelica_files.gd"
+	if not DirAccess.dir_exists_absolute(dir.path_join("movemaps")) or not ResourceLoader.exists(mm_path):
+		return null
+	var mm = load(mm_path).new()
+	var err = mm.load(load(files_path).new(dir), dir.path_join("movemaps"))
+	if err != "":
+		log_line("Map %s: Wegekarte %s" % [map_name, err])
+		return null
+	return mm
 
 # Werte der Monster- / NPC-Vorlagen (Plugin Server/npc_templates.json), {} wenn sie fehlen
 func _templates() -> Dictionary:
@@ -546,6 +577,11 @@ func _world_ready(id: int, p: Dictionary, _args: Dictionary) -> Array:
 		return [Proto.Code.NOT_IN_WORLD, {}]
 	game_world.enter(id, p["char_info"])
 	var pl: Dictionary = game_world.players[id]
+	game_world.skills.auto_learn(id, pl) # Klassen-Fertigkeiten bis Stufe 20 (F8), auch für ältere Figuren
+	if game_world.casting != null:
+		game_world.casting.apply_passives(pl) # passive Fertigkeiten (F7): Dauer-Effekte vor den Werten
+	if game_world.buffs != null:
+		game_world.buffs.restore(id, pl) # Effekte mit offline_save (z.B. Rassen-Segen, Z2)
 	var data = {"id": p["char_id"], "npcs": game_world.npcs_in_view(id)}
 	if game_world.quests != null:
 		game_world.quests.auto_deliver(id, pl)
@@ -556,7 +592,10 @@ func _world_ready(id: int, p: Dictionary, _args: Dictionary) -> Array:
 	data["skills"] = game_world.skills.state_of(pl)
 	data["skills"]["info"] = game_world.casting.infos(pl)
 	data["skills"]["cool"] = game_world.casting.cooldowns(pl)
+	data["skills"]["switched"] = game_world.buffs.switched(pl) if game_world.buffs != null else []
+	data["skills"]["catalog"] = game_world.skills.catalog(pl)
 	data["buffs"] = game_world.buffs.list_of(pl) if game_world.buffs != null else []
+	data["towns"] = game_world.combat.towns_of(pl) if game_world.combat != null else []
 	return [Proto.Code.OK, data]
 
 func _world_leave(id: int, p: Dictionary, _args: Dictionary) -> Array:
@@ -657,6 +696,107 @@ func _skill_cast(id: int, _p: Dictionary, args: Dictionary) -> Array:
 		game_world.move(id, Vector3(pos[0], pos[1], pos[2]), pl["dir"], Proto.MOVE_STAND) # wie MOVE geprüft
 	return game_world.casting.cast(id, pl, args.get("id"), args.get("target"))
 
+# Testbefehl (nur mit debug_commands): Effekt {state, target (0 = die eigene Figur, sonst ein sichtbares Monster),
+# time ms, values} anlegen wie von einer Fertigkeit der eigenen Figur, Erfolg 100 % -> {ok}
+func _debug_state(id: int, _p: Dictionary, args: Dictionary) -> Array:
+	if not debug_commands:
+		return [Proto.Code.NOT_ALLOWED, {}]
+	if not game_world.has(id) or game_world.buffs == null:
+		return [Proto.Code.NOT_IN_WORLD, {}]
+	var state = args.get("state")
+	var target = args.get("target", 0)
+	var time = args.get("time", 5000)
+	var values = args.get("values", [])
+	if not state is int or not target is int or not time is int or not values is Array \
+			or not values.all(func(v): return v is int or v is float):
+		return [Proto.Code.BAD_REQUEST, {}]
+	var pl: Dictionary = game_world.players[id]
+	var nm = game_world.npc_maps.get(pl["map"])
+	var obj = pl if target == 0 else (nm.objects.get(target) if nm != null and pl["npc_seen"].has(target) else null)
+	if obj == null:
+		return [Proto.Code.TARGET_INVALID, {}]
+	var ok = game_world.buffs.apply(obj, pl["map"], state, values, time, 100, pl)
+	log_line("Test: %s legt Effekt %d auf %d an (%s)" % [pl["name"], state, obj["id"], "ok" if ok else "abgelehnt"])
+	return [Proto.Code.OK, {"ok": ok}]
+
+# Fertigkeit lernen bzw. eine Stufe höher {id, gold} gegen Seelenmünzen, mit gold = true deckt Gold den Rest
+# (F8 / Z4; bis Stufe 20 lernt die Figur von selbst)
+func _skill_learn(id: int, _p: Dictionary, args: Dictionary) -> Array:
+	if not game_world.has(id) or game_world.skills == null:
+		return [Proto.Code.NOT_IN_WORLD, {}]
+	var gold = args.get("gold", false)
+	if not gold is bool:
+		return [Proto.Code.BAD_REQUEST, {}]
+	return game_world.skills.learn_request(id, game_world.players[id], args.get("id"), gold)
+
+# Ort eines Quest-Ziels für die Autoroute (Z3) {kind: "mon" (Monster-Vorlage id) / "item" (Gegenstand id der laufenden Quest
+# quest: Sammelpunkte mit task_in / task_out = quest oder dem Gegenstand im Ertrag), id, quest} -> {map, world, pos}
+func _quest_where(id: int, _p: Dictionary, args: Dictionary) -> Array:
+	if not game_world.has(id):
+		return [Proto.Code.NOT_IN_WORLD, {}]
+	var kind = args.get("kind")
+	var tid = args.get("id")
+	var quest = args.get("quest", 0)
+	if not kind is String or not kind in ["mon", "item"] or not tid is int or not quest is int:
+		return [Proto.Code.BAD_REQUEST, {}]
+	var w = game_world.where_target(game_world.players[id], kind, tid, quest)
+	return [Proto.Code.OK, w] if not w.is_empty() else [Proto.Code.TARGET_INVALID, {}]
+
+# Test: Stufe und / oder Geld der Figur setzen {level, money, bind_money} (nur mit debug_commands); eine neue Stufe lernt
+# wie ein Stufenaufstieg bis Stufe 20 von selbst
+func _debug_char(id: int, _p: Dictionary, args: Dictionary) -> Array:
+	if not debug_commands:
+		return [Proto.Code.NOT_ALLOWED, {}]
+	if not game_world.has(id):
+		return [Proto.Code.NOT_IN_WORLD, {}]
+	var pl: Dictionary = game_world.players[id]
+	var level = args.get("level", int(pl["level"]))
+	var money = args.get("money", int(pl.get("money", 0)))
+	var bind = args.get("bind_money", int(pl.get("bind_money", 0)))
+	if not level is int or not money is int or not bind is int or level < 1 or level > 200 or money < 0 or bind < 0:
+		return [Proto.Code.BAD_REQUEST, {}]
+	pl["money"] = money
+	pl["bind_money"] = bind
+	if level != int(pl["level"]):
+		pl["level"] = level
+		pl["exp"] = 0
+		if inventory != null:
+			inventory.apply_stats(pl)
+		if game_world.buffs != null:
+			game_world.buffs.refresh(pl)
+		pl["hp"] = pl["max_hp"]
+		pl["mp"] = pl["max_mp"]
+		game_world.skills.auto_learn(id, pl)
+		if game_world.quests != null:
+			game_world.quests.auto_deliver(id, pl) # wie ein Stufenaufstieg: z.B. das Essenz-Geschenk der Stufe (Z5)
+	if game_world.quests != null:
+		game_world.quests.save_stats(pl)
+	game_world.combat._push_stats(id, pl)
+	log_line("Test: %s auf Stufe %d mit %d Kupfer Gold, %d Kupfer Seelenmünzen" % [pl["name"], level, money, bind])
+	return [Proto.Code.OK, {"level": level, "money": money, "bind_money": bind}]
+
+func _peer_of_player(pl: Dictionary) -> int:
+	for peer in game_world.players:
+		if game_world.players[peer] == pl:
+			return peer
+	return -1
+
+# Test: Fertigkeit lernen bzw. ihre Stufe setzen {id, level} (nur mit debug_commands; Lernen beim Lehrer folgt in F8)
+func _debug_skill(id: int, _p: Dictionary, args: Dictionary) -> Array:
+	if not debug_commands:
+		return [Proto.Code.NOT_ALLOWED, {}]
+	if not game_world.has(id) or game_world.skills == null or game_world.casting == null:
+		return [Proto.Code.NOT_IN_WORLD, {}]
+	var sid = args.get("id")
+	var level = args.get("level", 1)
+	if not sid is int or not level is int or level < 1 or not game_world.casting.templates.has(sid):
+		return [Proto.Code.BAD_REQUEST, {}]
+	var pl: Dictionary = game_world.players[id]
+	level = mini(level, int(game_world.casting.templates[sid].get("max_level", level)))
+	game_world.skills.learn(id, pl, sid, level)
+	log_line("Test: %s lernt Fertigkeit %d auf Stufe %d" % [pl["name"], sid, level])
+	return [Proto.Code.OK, {"id": sid, "level": level}]
+
 func _skill_cancel(id: int, _p: Dictionary, _args: Dictionary) -> Array:
 	return game_world.casting.cancel_request(id, game_world.players[id]) if game_world.has(id) else [Proto.Code.NOT_IN_WORLD, {}]
 
@@ -669,6 +809,25 @@ func _gather(id: int, _p: Dictionary, args: Dictionary) -> Array:
 		return [Proto.Code.NOT_IN_WORLD, {}]
 	var pl: Dictionary = game_world.players[id]
 	return inventory.gather(id, pl, game_world.npc_maps.get(pl["map"]), target)
+
+# Gegenstand der Tasche benutzen {pos} -> {pos, id, time} (Quest-Würfel wie der EXP-Cocktail, Z5); Ende: use_end
+func _item_use(id: int, _p: Dictionary, args: Dictionary) -> Array:
+	var pos = args.get("pos")
+	if not pos is int:
+		return [Proto.Code.BAD_REQUEST, {}]
+	if not game_world.has(id):
+		return [Proto.Code.NOT_IN_WORLD, {}]
+	return inventory.use(id, game_world.players[id], pos)
+
+# Gegenstand zerstören {pos, id} (ganzer Stapel, wie c2s_CmdDestroyItem)
+func _item_destroy(id: int, _p: Dictionary, args: Dictionary) -> Array:
+	var pos = args.get("pos")
+	var tid = args.get("id")
+	if not pos is int or not tid is int:
+		return [Proto.Code.BAD_REQUEST, {}]
+	if not game_world.has(id):
+		return [Proto.Code.NOT_IN_WORLD, {}]
+	return inventory.destroy(id, game_world.players[id], pos, tid)
 
 func _gather_cancel(id: int, _p: Dictionary, _args: Dictionary) -> Array:
 	if not game_world.has(id):
@@ -813,7 +972,8 @@ func _write_status(running: bool) -> void:
 		var p = peers[id]
 		if p["account_id"] != 0:
 			players_out.append({"peer": id, "name": p["account"], "address": p["address"], "since": p["since"]})
-	var f = FileAccess.open(status_file, FileAccess.WRITE)
+	# erst in eine Hilfsdatei, dann umbenennen: Leser (Leiste SERVER, Tests) sehen nie eine halb geschriebene Datei
+	var f = FileAccess.open(status_file + ".tmp", FileAccess.WRITE)
 	if f == null:
 		return
 	f.store_string(JSON.stringify({
@@ -822,3 +982,5 @@ func _write_status(running: bool) -> void:
 		"players": players_out, "maps": world.size(),
 		"in_world": game_world.players.size() if game_world != null else 0, "load": _load,
 	}, "\t"))
+	f.close()
+	DirAccess.rename_absolute(ProjectSettings.globalize_path(status_file + ".tmp"), ProjectSettings.globalize_path(status_file))

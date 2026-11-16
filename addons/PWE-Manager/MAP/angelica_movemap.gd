@@ -24,6 +24,9 @@ extends RefCounted
 # Wechsel der Ebene an einem Feld, wo beide begehbar sind und höchstens LAYER_DH auseinanderliegen;
 # ist Start oder Ziel nicht begehbar, das nächste begehbare Feld (bis SNAP_RADIUS). Danach geglättet:
 # gerade Stücke, solange alle überquerten Felder derselben Ebene begehbar sind.
+# Gesperrte Felder (block_strip): Hindernisse, die die Wegekarte nicht kennt (z.B. ein Pfosten am Wiederbelebungspunkt von s9,
+# dessen Gebäude neuer ist als die Wegekarte) - der Client sperrt sie, wenn die Figur auf der Route stecken bleibt, und sucht
+# neu; passable() gilt dort nicht mehr (bis die Wegekarte neu geladen wird).
 #   load(files, Ordner movemaps) -> "" oder Fehlertext
 #   find_path(von, nach, dh_von, nach_ohne_höhe) -> PackedVector3Array (x, Höhe über Gelände, z), leer =
 #   kein Weg; state / expanded nach der Suche
@@ -43,6 +46,7 @@ var length = 0
 var pixel = 1.0 # m je Feld
 var state = "" # "", "gefunden", "kein Weg", "Start ungültig", "Ziel ungültig", "zu weit"
 var expanded = 0
+var blocked = {} # Vector3i(u, v, Ebene) -> true (block_strip)
 
 
 func load(files, dir: String) -> String:
@@ -165,6 +169,8 @@ func world_of(c: Vector2i) -> Vector2:
 func passable(layer: int, u: int, v: int) -> bool:
 	if u < 0 or v < 0 or u >= width or v >= length or layer < 0 or layer >= layers.size():
 		return false
+	if not blocked.is_empty() and blocked.has(Vector3i(u, v, layer)):
+		return false
 	var L: Dictionary = layers[layer]
 	var bits: PackedByteArray = L["bits"]
 	if bits.is_empty():
@@ -188,6 +194,30 @@ func which_layer(c: Vector2i, height_over_ground: float) -> int:
 				best_d = d
 				best = i
 	return best
+
+# Felder eines Streifens vor pos sperren (Richtung dir in x / z, von near bis far m, halbe Breite half m) auf der Ebene layer;
+# das Feld unter pos bleibt frei -> Anzahl neu gesperrter Felder
+func block_strip(pos: Vector3, dir: Vector2, layer: int, near: float, far: float, half: float) -> int:
+	if dir.length() < 0.001 or layer < 0:
+		return 0
+	var d = dir.normalized()
+	var side = Vector2(-d.y, d.x)
+	var own = cell_of(pos.x, pos.z)
+	var n = 0
+	var step = pixel * 0.5
+	var a = near
+	while a <= far + 0.001:
+		var b = -half
+		while b <= half + 0.001:
+			var w = Vector2(pos.x, pos.z) + d * a + side * b
+			var c = cell_of(w.x, w.y)
+			var key = Vector3i(c.x, c.y, layer)
+			if c != own and not blocked.has(key):
+				blocked[key] = true
+				n += 1
+			b += step
+		a += step
+	return n
 
 func min_passable_layer(c: Vector2i) -> int:
 	for i in layers.size():

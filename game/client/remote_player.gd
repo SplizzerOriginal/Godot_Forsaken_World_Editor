@@ -116,13 +116,21 @@ func play_attack() -> String:
 		_once = act
 	return act
 
-# Aktion einer Fertigkeit einmal abspielen -> Länge s (0 = Figur hat sie nicht)
+# Aktion einer Fertigkeit einmal abspielen -> Länge s (0 = Figur hat sie nicht); Schleifen-Aktionen (循环,
+# Stadtportal) laufen bis stop_once (skill_end)
 func play_skill(act: String) -> float:
 	if anim == null or act == "" or not anim.has_animation(act) or dead:
 		return 0.0
+	if act.contains("循环"):
+		anim.get_animation(act).loop_mode = Animation.LOOP_LINEAR
 	anim.play(act, 0.1)
 	_once = act
 	return anim.get_animation(act).length
+
+# Laufende Fertigkeits-Aktion beenden (abgebrochen bzw. Schleife zu Ende)
+func stop_once() -> void:
+	_once = ""
+	_animate()
 
 func die() -> void:
 	dead = true
@@ -147,6 +155,13 @@ func face(p: Vector3) -> void:
 func set_dir(dir: float) -> void:
 	if model != null:
 		model.rotation.y = dir
+
+# Ansturm (skill_move): zum Ziel (die Nachführung gleitet; weit weg springt sie)
+func dash(to: Vector3, _secs: float) -> void:
+	var d = to - position
+	if Vector2(d.x, d.z).length() > 0.05:
+		target_dir = atan2(d.x, d.z)
+	target_pos = to
 
 func update_state(pos: Vector3, dir: float, p_state: int) -> void:
 	target_pos = pos

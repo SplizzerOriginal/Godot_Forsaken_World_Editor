@@ -15,11 +15,19 @@ extends RefCounted
 # Werte (apply_stats): Höchst-HP / -MP = Klasse und Stufe (stats.gd) + hp / mp der Ausrüstung;
 # Kampfwerte attr (stats.gd attributes) mit Angriff, Verteidigung, Treffer der Ausrüstung.
 # Sammeln (gather): Sammelpunkt (npcs.gd, Vorlage in mines) in Sicht, höchstens dist + GATHER_SLACK m
-# entfernt, Quest task_in läuft (falls verlangt), nicht schon beim Sammeln; Dauer t[0] - t[1] s.
+# entfernt, Quest task_in läuft (falls verlangt), nicht schon beim Sammeln; Dauer t[0] - t[1] s. Verlangt der Punkt ein
+# Werkzeug (tools, need_tool), muss eins der Liste in der Tasche sein (das erste gefundene, wie CECHostPackSet::FindMineTool;
+# sonst GATHER_NEED_TOOL); bei Erfolg wird es mit seiner Wahrscheinlichkeit verbraucht (z.B. Ungezündete Fackel 15030 am
+# Lagerfeuer 14554 -> Leuchtende Fackel 14556, die an der Zentaurenkanone 14553 verbraucht wird).
 # Fertig (tick): noch in der Nähe -> task_out an quests.gd mine() (CheckMining: der gesuchte
 # Gegenstand der Quest), sonst ein Material nach Wahrscheinlichkeit; ein Punkt ohne perm verschwindet
 # (npcs.gd harvest, Respawn). Bewegt sich die Figur mehr als GATHER_MOVE m, bricht es ab.
-# Meldungen: inventory {size, bag: [[Platz, ID, Anzahl]], equip: [[Platz, ID]]}, gather_end {id, ok,
+# Benutzen (use, Z5): Quest-Würfel (dice, z.B. EXP-Cocktail) in der Tasche; die Quest der Liste (nach
+# Wahrscheinlichkeit) muss vergebbar sein (quests.gd can_deliver, z.B. Stufe 20 für den Gelben Cocktail); nach use_time s
+# (time_intonate, "Trinken") ein Stück weg und die Quest vergeben und erfüllt (quests.gd dice: EXP); Bewegen bricht ab.
+# Zerstören (destroy, wie c2s_CmdDestroyItem): der ganze Stapel an pos, wenn dort id liegt und die Vorlage zerstörbar ist
+# (proc ohne PROC_NOT_DESTROYABLE 0x400, z.B. die Quest-Fackeln nicht).
+# Meldungen: inventory {size, bag: [[Platz, ID, Anzahl]], equip: [[Platz, ID]]}, use_end {pos, id, ok}, gather_end {id, ok,
 # items: [[ID, Anzahl]]}; Ausrüstung für andere: player_equip {id, equip} (world.gd).
 # ====================================================
 
@@ -30,7 +38,8 @@ const BAG = 0
 const EQUIP = 1
 const EQUIP_SLOTS = 32
 const GATHER_SLACK = 1.5 # m zusätzlich zu max_distance (Lauf-Latenz)
-const GATHER_MOVE = 0.5 # m: weiter bewegt = abgebrochen
+const GATHER_MOVE = 0.5 # m: weiter bewegt = abgebrochen (Sammeln und Benutzen)
+const PROC_NOT_DESTROYABLE = 0x400 # proc_type-Bit (CECIvtrItem::PROC_NOT_DESTROYABLE)
 
 var db
 var net
@@ -67,6 +76,8 @@ static func _ints(t: Dictionary) -> Dictionary:
 			t[k] = int(v)
 		elif v is Array and k in ["t", "lv", "dmg"]:
 			t[k] = v.map(func(x): return int(x))
+		elif v is Array and k == "tools":
+			t[k] = v.map(func(x): return [int(x[0]), int(x[1]), float(x[2])])
 	return t
 
 func item(id: int) -> Dictionary:
@@ -84,6 +95,7 @@ func load_player(p: Dictionary) -> void:
 	p["equip"] = {}
 	p["bag_size"] = BAG_SIZE
 	p["gather"] = {}
+	p["use"] = {}
 	var rows = db.query("SELECT location, pos, item_id, count FROM inventory WHERE character_id = ? AND location IN (?, ?)",
 		[p["id"], BAG, EQUIP])
 	for r in (rows if rows != null else []):
@@ -358,11 +370,21 @@ func gather(peer: int, p: Dictionary, nm, id: int) -> Array:
 		return [Proto.Code.GATHER_INVALID, {}]
 	if nm.busy(id) and not m.get("multi", false):
 		return [Proto.Code.GATHER_BUSY, {}]
+	var tool = tool_for(p, m)
+	if m.has("tools") and tool.is_empty():
+		return [Proto.Code.GATHER_NEED_TOOL, {}]
 	var t: Array = m.get("t", [0, 0])
 	var secs = randi_range(int(t[0]), maxi(int(t[0]), int(t[1])))
-	p["gather"] = {"id": id, "tid": int(o["tid"]), "end": Time.get_ticks_msec() + secs * 1000, "pos": p["pos"]}
+	p["gather"] = {"id": id, "tid": int(o["tid"]), "end": Time.get_ticks_msec() + secs * 1000, "pos": p["pos"], "tool": tool}
 	nm.lock(id, p["id"])
 	return [Proto.Code.OK, {"id": id, "time": secs}]
+
+# Werkzeug für den Sammelpunkt m aus der Tasche: erstes der Liste tools, das da ist -> [ID, verbraucht, Wahrscheinlichkeit] oder []
+func tool_for(p: Dictionary, m: Dictionary) -> Array:
+	for t in m.get("tools", []):
+		if count_of(p, int(t[0])) > 0:
+			return [int(t[0]), int(t[1]), float(t[2])]
+	return []
 
 func cancel_gather(peer: int, p: Dictionary, nm, notify: bool) -> void:
 	var g: Dictionary = p.get("gather", {})
@@ -374,18 +396,100 @@ func cancel_gather(peer: int, p: Dictionary, nm, notify: bool) -> void:
 	if notify:
 		net.push(peer, "gather_end", {"id": g["id"], "ok": false})
 
-# Jeden Takt: Sammeln fertig?
+# ====================================================
+# ZERSTÖREN
+# ====================================================
+func destroy(peer: int, p: Dictionary, pos: int, id: int) -> Array:
+	var e = p["bag"].get(pos)
+	if e == null or int(e[0]) != id:
+		return [Proto.Code.ITEM_INVALID, {}]
+	if int(item(id).get("proc", 0)) & PROC_NOT_DESTROYABLE:
+		return [Proto.Code.ITEM_NOT_DESTROYABLE, {}]
+	var u: Dictionary = p.get("use", {})
+	if not u.is_empty() and int(u["pos"]) == pos:
+		cancel_use(peer, p, true)
+	var n = int(e[1])
+	p["bag"].erase(pos)
+	_delete(p, BAG, pos)
+	push(peer, p)
+	log_line.call("Zerstört: %s %d x %d (Platz %d)" % [p["name"], n, id, pos])
+	return [Proto.Code.OK, {"pos": pos}]
+
+# ====================================================
+# BENUTZEN (Quest-Würfel)
+# ====================================================
+func use(peer: int, p: Dictionary, pos: int) -> Array:
+	if not p.get("gather", {}).is_empty() or not p.get("use", {}).is_empty():
+		return [Proto.Code.GATHER_BUSY, {}]
+	var e = p["bag"].get(pos)
+	if e == null:
+		return [Proto.Code.ITEM_INVALID, {}]
+	var t = item(int(e[0]))
+	if not t.has("dice") or quests == null:
+		return [Proto.Code.ITEM_NOT_USABLE, {}]
+	var quest = _roll(t["dice"])
+	var code = quests.can_deliver(p, quest)
+	if code != Proto.Code.OK:
+		return [code, {}]
+	var secs = int(t.get("use_time", 0))
+	p["use"] = {"pos": pos, "id": int(e[0]), "quest": quest, "end": Time.get_ticks_msec() + secs * 1000, "at": p["pos"]}
+	if secs == 0:
+		_use_done(peer, p)
+	return [Proto.Code.OK, {"pos": pos, "id": int(e[0]), "time": secs}]
+
+func cancel_use(peer: int, p: Dictionary, notify: bool) -> void:
+	var u: Dictionary = p.get("use", {})
+	if u.is_empty():
+		return
+	p["use"] = {}
+	if notify:
+		net.push(peer, "use_end", {"pos": u["pos"], "id": u["id"], "ok": false})
+
+func _roll(list: Array) -> int:
+	var r = randf()
+	for e in list:
+		r -= float(e[1])
+		if r <= 0.0:
+			return int(e[0])
+	return int(list[0][0])
+
+func _use_done(peer: int, p: Dictionary) -> void:
+	var u: Dictionary = p["use"]
+	p["use"] = {}
+	var e = p["bag"].get(int(u["pos"]))
+	var ok = e != null and int(e[0]) == int(u["id"]) and quests.can_deliver(p, int(u["quest"])) == Proto.Code.OK
+	if ok:
+		e[1] = int(e[1]) - 1
+		if int(e[1]) <= 0:
+			p["bag"].erase(int(u["pos"]))
+			_delete(p, BAG, int(u["pos"]))
+		else:
+			_save(p, BAG, int(u["pos"]), int(e[0]), int(e[1]))
+		push(peer, p)
+		quests.dice(peer, p, int(u["quest"]))
+	net.push(peer, "use_end", {"pos": u["pos"], "id": u["id"], "ok": ok})
+	log_line.call("Benutzen: %s %d -> Quest %d (%s)" % [p["name"], int(u["id"]), int(u["quest"]), "ok" if ok else "abgelehnt"])
+
+# Jeden Takt: Benutzen bzw. Sammeln fertig?
 func tick(peer: int, p: Dictionary, nm) -> void:
+	var u: Dictionary = p.get("use", {})
+	if not u.is_empty() and Time.get_ticks_msec() >= int(u["end"]):
+		_use_done(peer, p)
 	var g: Dictionary = p.get("gather", {})
 	if g.is_empty() or Time.get_ticks_msec() < int(g["end"]):
 		return
 	var o = nm.objects.get(g["id"]) if nm != null else null
 	var m: Dictionary = mines.get(int(g["tid"]), {})
-	if o == null or p["pos"].distance_to(o["pos"]) > float(m.get("dist", 3.0)) + GATHER_SLACK * 2.0:
+	var tool: Array = g.get("tool", [])
+	if o == null or p["pos"].distance_to(o["pos"]) > float(m.get("dist", 3.0)) + GATHER_SLACK * 2.0 \
+			or (not tool.is_empty() and count_of(p, int(tool[0])) <= 0):
 		cancel_gather(peer, p, nm, true)
 		return
 	p["gather"] = {}
 	nm.unlock(g["id"], p["id"])
+	var used = 0
+	if not tool.is_empty() and int(tool[1]) != 0 and randf() < float(tool[2]):
+		used = remove(p, int(tool[0]), 1)
 	var got = []
 	var task_out = int(m.get("task_out", 0))
 	if task_out != 0 and quests != null:
@@ -399,12 +503,12 @@ func tick(peer: int, p: Dictionary, nm) -> void:
 					add(p, int(mat[0]), 1)
 					got.append([int(mat[0]), 1])
 				break
-	if not got.is_empty():
+	if not got.is_empty() or used > 0:
 		push(peer, p)
 	if not m.get("perm", false):
 		nm.harvest(g["id"], Time.get_ticks_msec() / 1000.0)
 	net.push(peer, "gather_end", {"id": g["id"], "ok": true, "items": got})
-	log_line.call("Sammeln: %s an %d -> %s" % [p["name"], int(g["tid"]), str(got)])
+	log_line.call("Sammeln: %s an %d -> %s%s" % [p["name"], int(g["tid"]), str(got), (" (Werkzeug %d verbraucht)" % int(tool[0])) if used > 0 else ""])
 	if quests != null and not got.is_empty():
 		quests.check_items(peer, p)
 

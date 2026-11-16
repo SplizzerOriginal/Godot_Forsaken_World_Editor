@@ -44,14 +44,21 @@ const LANGUAGES = ["Deu", "Eng", "Franz"]
 # 0 / false ist eine Quest der obersten Ebene vorerst nicht vergebbar (CheckPrerequisite des gs).
 # Nicht dabei: m_i64RegionMask (Server-Regionen, CCheckRegionMask: unser Server gilt für alle) und
 # m_bTeamwork (sperrt nur mit m_bRcvByTeam, CCheckTeamTask)
-const UNSUPPORTED = ["m_ulTimetable", "m_bBirthday", "m_bDelvInZone", "m_ulPremItems",
+# und m_ulPremise_Cotask_Cnt (Mit-Quest: laufende Quests m_ulPremise_Cotask, verknüpft nach m_ulCoTaskCond -
+# 1 = alle, 0 = eine davon; prüfen Server und Client selbst, Export "cotask" / "cotask_any") und m_ulPremBuffCnt
+# (Effekte m_PremBuff: PREM_BUFF {ID, Mindest-Stufe, bTaken = muss haben / darf nicht haben}, m_bPremBuffCond true = alle,
+# sonst einer; Export "buffs" / "buffs_all", beim Abschluss m_FinBuff "fin_buffs" / "fin_buffs_all")
+# und m_ulPremItems (Gegenstände in der Tasche, mit deposit bei der Vergabe eingezogen - z.B. Prüfungs-Essenzen
+# beim Tausch im Fenster Win_LvupAward; Export "prem"); nur Gegenstände in der Ausrüstung (m_ulCheckArea 1)
+# sperren noch
+const UNSUPPORTED = ["m_ulTimetable", "m_bBirthday", "m_bDelvInZone",
 	"m_ulPremTitleCount", "m_ulPremise_Deposit", "m_lPremise_Reputation", "m_nPremise_Vigour", "m_nPremise_Vitality",
 	"m_nPremise_InteractionPoints", "m_lPremise_Contribution", "m_nPremise_FamContrib", "m_ulPremise_FactionMoney",
 	"m_ulPremise_FacCredit", "m_ulPremise_AchievementCount", "m_ulPremise_AchievementPoint", "m_ulPremise_Period",
-	"m_ulPremise_Faction", "m_bPremise_Master", "m_bPremise_Spouse", "m_ulPremise_Cotask_Cnt", "m_ulPremFinishTaskCount",
+	"m_ulPremise_Faction", "m_bPremise_Master", "m_bPremise_Spouse", "m_ulPremFinishTaskCount",
 	"m_ulPremGlobalCount", "m_lSkillLev", "m_ulSpecialAward", "m_bPremise_GM", "m_bPremise_CallPet", "m_bRcvByTeam",
 	"m_bMarriage", "m_bSharedByFamily", "m_bLuaTask", "m_bInFamily", "m_bFamilyHeader", "m_ulPremSkillCnt",
-	"m_ulPremBuffCnt", "m_ulPremAccompCnt", "m_iBindMoney", "m_bDiscoverMap", "m_iFlyLevel", "m_iBelief",
+	"m_ulPremAccompCnt", "m_iBindMoney", "m_bDiscoverMap", "m_iFlyLevel", "m_iBelief",
 	"m_iMinGodLevel", "m_iMinEvilLevel", "m_cVipLevel", "m_ulConsumeScore", "m_iServerType", "m_iMarriage",
 	"m_bCreateDungeon", "m_bEnterDungeon", "m_bDeathTrig", "m_bEmotionTrig", "m_bPursueTradeTask", "m_bRaidTeam",
 	"m_ulChangedRace", "m_nPremBattleScoreMin"]
@@ -160,6 +167,17 @@ func unsupported(q: Dictionary) -> Array:
 		var v = field(q, fname)
 		if (v is bool and v) or ((v is int or v is float) and v != 0):
 			out.append(fname)
+	if q.get("premise_items", []).any(func(it): return int(it.get("area", 0)) != 0):
+		out.append("m_ulPremItems") # Vorbedingung in der Ausrüstung
+	return out
+
+# Effekt-Liste PREM_BUFF (m_PremBuff / m_FinBuff, je 9 Bytes) -> [[ID, Mindest-Stufe, muss haben]]
+static func buff_list(raw_list, count: int) -> Array:
+	var out = []
+	for i in mini(count, raw_list.size() if raw_list is Array else 0):
+		var b: PackedByteArray = raw_list[i]
+		if b.size() >= 9 and b.decode_s32(0) != 0:
+			out.append([b.decode_s32(0), b.decode_s32(4), b[8] != 0])
 	return out
 
 # Alle Teildateien einmal lesen, aber nur merken, wo jede Quest steht -> Anzahl der obersten Ebene
@@ -288,7 +306,15 @@ func _award(b: PackedByteArray, at: Array) -> Dictionary:
 	var raw = b.slice(at[0], at[0] + size)
 	at[0] += size
 	var a = {"gold": _ua(raw, "m_ulGoldNum"), "exp": _ua(raw, "m_ulExp"), "sp": _ua(raw, "m_ulSP"),
-		"reputation": _ua(raw, "m_ulReputation"), "new_task": _ua(raw, "m_ulNewTask"), "items": []}
+		"reputation": _ua(raw, "m_ulReputation"), "new_task": _ua(raw, "m_ulNewTask"), "items": [],
+		"skill": _ua(raw, "m_lSkillID"), "skill_level": _ua(raw, "m_lSkillLev"), "del_skill": _ua(raw, "m_lDelSkillID"),
+		# Seelenmünzen (gebundenes Geld); gold_revise: Gold und Seelenmünzen * Stufenfaktor der Figur,
+		# höchstens bis Stufe gold_revise_lev (PLAYER_TALENT_CONFIG task_money_factor / task_bind_money_factor)
+		"bind_money": _s32(_ua(raw, "m_iBindMoney")), "bind_algo": _s32(_ua(raw, "m_ulBindMoneyAlgo")),
+		"gold_revise": _ua(raw, "m_bGoldRevise") != 0, "gold_revise_lev": _s32(_ua(raw, "m_lGoldReviseLev")),
+		# EXP ebenso: exp_revise -> * Stufenfaktor bis exp_revise_lev, exp_fix -> * Faktor genau dieser Stufe
+		"exp_revise": _ua(raw, "m_bExpRevise") != 0, "exp_revise_lev": _s32(_ua(raw, "m_lExpReviseLev")),
+		"exp_fix": _ua(raw, "m_bExpFix") != 0}
 	for i in _ua(raw, "m_ulCandItems"):
 		var group = {"random": b.decode_u8(at[0]) != 0, "items": []}
 		at[0] += 1
@@ -305,13 +331,14 @@ func _read_u32(b: PackedByteArray, at: Array) -> int:
 	at[0] += 4
 	return v
 
-# ITEM_WANTED: ID, gewöhnlich (bool), Anzahl ...
+# ITEM_WANTED: ID, gewöhnlich (bool), Anzahl, Ort (m_ulCheckArea: 0 Tasche, 1 Ausrüstung), deposit (Vorbedingung:
+# wird bei der Vergabe eingezogen, RemovePrerequisiteItem), Wahrscheinlichkeit ...
 func _items(b: PackedByteArray, at: Array, n: int) -> Array:
 	var out = []
 	for i in n:
 		var p: int = at[0]
 		out.append({"id": b.decode_u32(p), "common": b.decode_u8(p + 4) != 0, "num": b.decode_u32(p + 5),
-			"prob": b.decode_float(p + 14)})
+			"area": b.decode_u32(p + 9), "deposit": b.decode_u8(p + 13) != 0, "prob": b.decode_float(p + 14)})
 		at[0] += _sizes["ITEM_WANTED"]
 	return out
 
@@ -369,6 +396,9 @@ func _table(struct_name: String) -> Dictionary:
 # Offset eines Feldes des festen Teils in der Datei-Version
 func _off(name: String) -> int:
 	return _shift(_fx[name][0], _v["fixed_steps"])
+
+static func _s32(v: int) -> int:
+	return v - 0x100000000 if v >= 0x80000000 else v
 
 static func _shift(off: int, steps: Array) -> int:
 	var s = 0

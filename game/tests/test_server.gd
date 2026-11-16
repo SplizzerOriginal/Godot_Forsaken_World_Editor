@@ -81,7 +81,8 @@ func running() -> bool:
 
 func status() -> Dictionary:
 	var path = dir.path_join("status.json")
-	var d = JSON.parse_string(FileAccess.get_file_as_string(path)) if FileAccess.file_exists(path) else null
+	var text = FileAccess.get_file_as_string(path) if FileAccess.file_exists(path) else ""
+	var d = JSON.parse_string(text) if text.strip_edges() != "" else null # leer: der Server schreibt gerade
 	return d if d is Dictionary else {}
 
 func log_text() -> String:

@@ -20,9 +20,9 @@ extends RefCounted
 # Konstante. Alle 38 Befehle; Funktionen des Skripts laufen mit (Upvalues als Wert beim Anlegen
 # der Funktion erfasst - für Datenskripte genügt das). Eingebaut: LuaInclude (Skript aus demselben
 # Ordner, einmal), pairs / ipairs / next, type, tostring / tonumber, select, unpack, setmetatable
-# (ohne Wirkung), rawget / rawset, assert, print / error (nur gemerkt), table.insert / remove /
+# (ohne Wirkung), rawget / rawset, assert, print / error (nur gemerkt), module (package.seeall), table.insert / remove /
 # getn / concat, math.floor / ceil / max / min / abs / huge, string.format / len / sub / upper /
-# lower / rep. Unbekannte Aufrufe liefern nil (in errors gemerkt). Abbruch nach MAX_STEPS Befehlen.
+# lower / rep / gsub (nur wörtliche Muster). Unbekannte Aufrufe liefern nil (in errors gemerkt). Abbruch nach MAX_STEPS Befehlen.
 # ====================================================
 
 const HEADER = [0x1b, 0x4c, 0x75, 0x61, 0x51, 0x00, 0x01, 0x04, 0x04, 0x04, 0x08, 0x00]
@@ -43,6 +43,7 @@ class LuaProto:
 class LuaClosure:
 	var proto: LuaProto
 	var upvals: Array = []
+	var env = null # Umgebung (module(...): Tabelle des Moduls, Lesen fällt auf globals zurück), null = globals
 
 var globals = {}
 var errors: Array = []
@@ -54,6 +55,7 @@ var _depth = 0
 var _dirs: Array = [] # Ordner der laufenden Skripte (LuaInclude)
 var _included = {}
 var _closures: Array = [] # alle angelegten Funktionen und Tabellen (für close())
+var _running: Array = [] # laufende Lua-Funktionen (module() setzt die Umgebung der aufrufenden)
 var _tables: Array = []
 
 
@@ -83,8 +85,10 @@ func _init(p_files = null) -> void:
 		"min": func(a): return [_num(a.reduce(func(m, x): return minf(m, float(x)), INF))],
 		"abs": func(a): return [_num(absf(float(_arg(a, 0))))], "huge": INF}
 	g["string"] = {"format": _string_format, "len": func(a): return [str(_arg(a, 0)).to_utf8_buffer().size()],
-		"sub": _string_sub, "upper": func(a): return [str(_arg(a, 0)).to_upper()],
+		"sub": _string_sub, "gsub": _string_gsub, "upper": func(a): return [str(_arg(a, 0)).to_upper()],
 		"lower": func(a): return [str(_arg(a, 0)).to_lower()], "rep": func(a): return [str(_arg(a, 0)).repeat(int(_arg(a, 1)))]}
+	g["module"] = _module
+	g["package"] = {"seeall": func(_a): return [], "loaded": {}}
 	g["_G"] = g
 
 # Skript ausführen (Pfad in den Spieldaten oder echte Datei) -> "" oder Fehlertext
@@ -110,7 +114,9 @@ func run_bytes(b: PackedByteArray, dir: String = "") -> String:
 func close() -> void:
 	for cl in _closures:
 		cl.upvals.clear()
+		cl.env = null
 	_closures.clear()
+	_running.clear()
 	for t in _tables:
 		for key in t.keys():
 			var v = t[key]
@@ -223,7 +229,9 @@ func _call(fn, args: Array) -> Array:
 			errors.append("Abbruch: Aufrufe zu tief")
 			return []
 		_depth += 1
+		_running.append(fn)
 		var r = _exec(fn, args)
+		_running.pop_back()
 		_depth -= 1
 		return r
 	errors.append("Aufruf von %s" % _type(fn))
@@ -267,14 +275,15 @@ func _exec(cl: LuaClosure, args: Array) -> Array:
 			4: # GETUPVAL
 				r[a] = cl.upvals[b] if b < cl.upvals.size() else null
 			5: # GETGLOBAL
-				r[a] = globals.get(k[bx])
+				r[a] = cl.env[k[bx]] if cl.env != null and cl.env.has(k[bx]) else globals.get(k[bx])
 			6: # GETTABLE
 				r[a] = _index(r[b], k[c - 256] if c >= 256 else r[c])
 			7: # SETGLOBAL
+				var genv: Dictionary = cl.env if cl.env != null else globals
 				if r[a] == null:
-					globals.erase(k[bx])
+					genv.erase(k[bx])
 				else:
-					globals[k[bx]] = r[a]
+					genv[k[bx]] = r[a]
 			8: # SETUPVAL
 				if b < cl.upvals.size():
 					cl.upvals[b] = r[a]
@@ -372,6 +381,7 @@ func _exec(cl: LuaClosure, args: Array) -> Array:
 				var np: LuaProto = f.p[bx]
 				var ncl = LuaClosure.new()
 				ncl.proto = np
+				ncl.env = cl.env
 				_closures.append(ncl)
 				for j in np.nups:
 					var pi = code[pc]
@@ -523,6 +533,20 @@ func _lua_include(a: Array) -> Array:
 		errors.append("LuaInclude(%s): %s" % [name, err])
 	return []
 
+# module(name, package.seeall): Tabelle name (in globals) wird die Umgebung der aufrufenden Funktion und der danach
+# darin angelegten Funktionen; globale Namen, die dort fehlen, kommen weiter aus globals (wie seeall)
+func _module(a: Array) -> Array:
+	var name = str(_arg(a, 0))
+	var m = globals.get(name)
+	if not m is Dictionary:
+		m = {}
+		_tables.append(m)
+		globals[name] = m
+	m["_NAME"] = name
+	if not _running.is_empty():
+		_running.back().env = m
+	return []
+
 # next(t, k) in Einfüge-Reihenfolge (einzeln aufgerufen: Suche des Schlüssels)
 func _next(a: Array) -> Array:
 	var t = _arg(a, 0)
@@ -613,6 +637,41 @@ func _string_sub(a: Array) -> Array:
 	i = maxi(i, 1)
 	j = mini(j, n)
 	return [s.substr(i - 1, j - i + 1) if i <= j else ""]
+
+# string.gsub(s, Muster, Ersatz[, n]) für Muster ohne Lua-Musterzeichen (%x = das Zeichen x selbst): ersetzt
+# den Text wörtlich (Ersatz als Text; %% -> %) -> [Ergebnis, Anzahl]; andere Muster bleiben unverändert (in errors gemerkt)
+func _string_gsub(a: Array) -> Array:
+	var s = _tostring(_arg(a, 0))
+	var pat = str(_arg(a, 1))
+	var lit = ""
+	var i = 0
+	while i < pat.length():
+		var ch = pat[i]
+		if ch == "%" and i + 1 < pat.length() and not pat[i + 1].is_valid_identifier():
+			lit += pat[i + 1]
+			i += 2
+			continue
+		if "^$()%.[]*+-?".contains(ch):
+			errors.append("string.gsub: Muster '%s' nicht unterstützt" % pat)
+			return [s, 0]
+		lit += ch
+		i += 1
+	var rep_v = _arg(a, 2)
+	if not (rep_v is String or rep_v is int or rep_v is float) or lit == "":
+		return [s, 0]
+	var limit = int(_arg(a, 3)) if _arg(a, 3) != null else -1
+	var by = _tostring(rep_v).replace("%%", "%")
+	var out = ""
+	var n = 0
+	var from = 0
+	while limit < 0 or n < limit:
+		var at = s.find(lit, from)
+		if at < 0:
+			break
+		out += s.substr(from, at - from) + by
+		from = at + lit.length()
+		n += 1
+	return [out + s.substr(from), n]
 
 # string.format mit %d %i %s %f %x %X %c %%  (Breite / Genauigkeit wie printf)
 func _string_format(a: Array) -> Array:

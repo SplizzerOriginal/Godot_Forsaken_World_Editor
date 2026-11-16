@@ -119,7 +119,8 @@ func build(p_race: int, p_gender: int, p_profession: int, look: Dictionary, acti
 		return _bon["error"]
 	var only = smd.duplicate()
 	only["skins"] = []
-	only["actions"] = smd["actions"].filter(func(a): return a["name"] in actions)
+	only["actions"] = smd_actions(smd, ecm, actions)
+	_ecm_cache[ecm_path] = ecm
 	_builder = Builder.new(importer.files, importer.reader, func(_src): return "") # nichts kopieren
 	_builder.extra_roots = importer.game_roots()
 	var built = _builder.build("Player", only, [])
@@ -171,9 +172,12 @@ func add_actions(figure: Node3D, actions: Array) -> int:
 	var bon: Dictionary = _bon_cache[bon_path]
 	if bon.has("error"):
 		return 0
+	if not _ecm_cache.has(ecm_path):
+		_ecm_cache[ecm_path] = importer.read_ecm(ecm_path)
+	var ecm: Dictionary = _ecm_cache[ecm_path]
 	var only = smd.duplicate()
 	only["skins"] = []
-	only["actions"] = smd["actions"].filter(func(a): return a["name"] in missing)
+	only["actions"] = smd_actions(smd, ecm, missing)
 	if only["actions"].is_empty():
 		return 0
 	if _builder == null:
@@ -188,9 +192,6 @@ func add_actions(figure: Node3D, actions: Array) -> int:
 			anim.loop_mode = Animation.LOOP_NONE
 			own.add_animation(a, anim)
 			n += 1
-	if not _ecm_cache.has(ecm_path):
-		_ecm_cache[ecm_path] = importer.read_ecm(ecm_path)
-	var ecm: Dictionary = _ecm_cache[ecm_path]
 	var points: Dictionary = figure.get_meta("attack_points", {})
 	var all_points = Importer.attack_points(ecm)
 	for a in missing:
@@ -201,6 +202,36 @@ func add_actions(figure: Node3D, actions: Array) -> int:
 	events.merge(_events_of(ecm, missing))
 	figure.set_meta("action_events", events)
 	return n
+
+# Grundaktionen der .smd für die genannten Aktionen: die kombinierte Aktion der .ecm (CombineActName) läuft mit
+# ihrer ersten vorhandenen Grundaktion (BaseActName) unter ihrem eigenen Namen (牧师_治愈术 -> 牧师_神罚,
+# 回城循环_巨剑 -> 回城循环_通用), ohne kombinierte Aktion die gleichnamige der .smd
+static func smd_actions(smd: Dictionary, ecm: Dictionary, names: Array) -> Array:
+	var base = {}
+	for a in smd["actions"]:
+		base[a["name"]] = a
+	var combined = {}
+	for c in ecm.get("actions", []):
+		if not combined.has(c["name"]):
+			combined[c["name"]] = c.get("base", [])
+	var out = []
+	var done = {}
+	for n in names:
+		if done.has(n):
+			continue
+		done[n] = true
+		var src = null
+		for b in combined.get(n, []):
+			if base.has(b):
+				src = base[b]
+				break
+		if src == null:
+			src = base.get(n)
+		if src != null:
+			var a = src.duplicate()
+			a["name"] = n
+			out.append(a)
+	return out
 
 # GFX- / Klang-Ereignisse der genannten Aktionen
 static func _events_of(ecm: Dictionary, actions: Array) -> Dictionary:

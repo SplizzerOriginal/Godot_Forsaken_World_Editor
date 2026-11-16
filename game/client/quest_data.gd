@@ -10,20 +10,29 @@ extends RefCounted
 #                     annehmbar (talk_deliver, sonst grau talk_unqualified), läuft (talk_execute)
 #   head_icon(NPC)    Symbol über dem Kopf wie CECNPCServer::UpdateCurQuestIcon (abschließbar vor
 #                     annehmbar vor läuft), Art des Bildes nach m_nTopic der Quest
-#   trace()           Quest-Verfolgung: sichtbare Quests der obersten Ebene mit dem laufenden Teil
+#   trace()           Quest-Verfolgung: sichtbare Quests der obersten Ebene mit dem laufenden Teil; Ziele mit Links
+#                     (goals: Monster / Gegenstand, Z3), erreichtes Ziel mit Abgabe-NPC (back)
 #   format_text()     Platzhalter wie CDlgTask::FormatTaskText (&name&, &level&, &race&, &item:ID& ...);
 #                     Koordinaten-Links &pos:(x,y,z,Welt)Name& werden zu POS_OPEN x,y,z,Welt POS_MID Name
 #                     POS_CLOSE (hud.gd macht daraus grüne Links mit Autoroute)
 #   item_count        Callable(ID) -> Anzahl in der Tasche (Ziele "Gegenstände sammeln": Name 0/1)
+#   my_buffs          Callable() -> eigene Effekte [[ID, Stapel, ...]] (Effekt-Bedingungen m_PremBuff)
 #   npc_pos           Orte der Quest-NPCs aus data\task_npc.data (angelica_tasks.gd npc_positions)
-# Annehmbar heißt hier wie auf dem Server (quests.gd can_deliver): Stufe, Rasse, Klasse, Geschlecht,
-# Vorquests, Ausschluss, nicht laufend, erledigt nur wiederholbar, keine noch nicht geprüfte
-# Vorbedingung (angelica_tasks.gd UNSUPPORTED).
+# Annehmbar heißt hier wie auf dem Server (quests.gd can_deliver): Stufe (levels: Mindeststufe aus den Server-Daten),
+# Rasse, Klasse, Geschlecht, Vorquests (13008 gilt als erfüllt), Vorbedingungs-Gegenstände (m_PremItems), Ausschluss, Mit-Quests (m_ulPremise_Cotask, m_ulCoTaskCond 1 = alle), Effekte (m_PremBuff),
+# nicht laufend, erledigt nur wiederholbar, keine noch nicht geprüfte Vorbedingung (angelica_tasks.gd UNSUPPORTED).
+# Methode 11 "Quest mehrmals erfüllen": Ziel "<Quest> n/Anzahl" nach dem Fortschritt n des Servers.
+# Belohnung im Quest-Fenster (log_entries): EXP (Z5), Goldmünzen und Seelenmünzen (Z4) wie der Server (stats.gd task_money:
+# m_bGoldRevise -> * Faktor der Figurenstufe aus PLAYER_TALENT_CONFIG der elements.data), Text über money_text.
 # ====================================================
 
 const TASKS = "res://addons/PWE-Manager/Data/angelica_tasks.gd"
 const FILES = "res://addons/PWE-Manager/Data/angelica_files.gd"
 const LUA = "res://addons/PWE-Manager/Data/angelica_lua.gd"
+# Stufen der Quests: die Mindeststufe fehlt in der tasks.data des Clients (immer 0), der Server liest sie aus seiner
+# tasks.data (tools/server_data/quest_templates.gd) - der Client nimmt dieselben Werte aus dem Plugin
+const SERVER_QUESTS = "res://addons/PWE-Manager/Server/quest_templates.json"
+const DONE_BY_DEFAULT = {13008: true} # Fenster-Quest "Prüfungs-Essenz erhalten" gilt als erfüllt (wie quests.gd)
 const ICON_SET = "ingame\\QuestList.tga"
 const POS_OPEN = "\uE000"
 const POS_MID = "\uE001"
@@ -42,6 +51,7 @@ const TALK_EXIT = 0x80000012
 const TALK_GIVEUP_TASK = 0x80000015
 const METHOD_TALK = 3
 const METHOD_WAIT = 5
+const METHOD_FINISH_TASK = 11
 
 var tasks = null # angelica_tasks.gd (Index)
 var elements = null # angelica_elements.gd (npc_data.gd)
@@ -55,7 +65,11 @@ var strings = {} # Texttabelle der Oberfläche (2201 ... Geschlecht, 120 + Rasse
 var warnings: Array = []
 var npc_pos = {} # NPC-Vorlage -> [Welt, Vector3] (task_npc.data, Ziele der Autoroute)
 var item_count: Callable = func(_id): return 0
+var my_buffs: Callable = func(): return []
+var money_text: Callable = func(copper): return str(copper) # Kupfer -> "x Gold y Silber z Kupfer" (hud.gd)
+var _money_factors = null # [task_money_factor, task_bind_money_factor, task_factor] (PLAYER_TALENT_CONFIG)
 var _services = {} # NPC-Vorlage -> [Ausgabe, Annahme]
+var levels = {} # Quest (oberste Ebene) -> [Mindest-, Höchststufe] aus SERVER_QUESTS
 
 
 # Im Thread: tasks.data der Sprache indizieren -> "" oder Fehlertext
@@ -70,9 +84,26 @@ func open(data_root: String, language: String) -> String:
 	if err != "":
 		return err
 	tasks.index_all()
+	_read_levels()
 	npc_pos = script.npc_positions(files, language)
 	_read_icons(files, language)
 	return ""
+
+func _read_levels() -> void:
+	levels = {}
+	var d = JSON.parse_string(FileAccess.get_file_as_string(SERVER_QUESTS)) if FileAccess.file_exists(SERVER_QUESTS) else null
+	if not d is Dictionary:
+		warnings.append("Quest-Stufen fehlen (%s), Mindeststufen unbekannt" % SERVER_QUESTS)
+		return
+	var all: Dictionary = d.get("tasks", {})
+	for k in all:
+		var t: Dictionary = all[k]
+		if t.has("lv") and not t.has("p"):
+			levels[int(k)] = [int(t["lv"][0]), int(t["lv"][1])]
+
+# Stufen einer Quest [min, max] (0 = ohne Grenze)
+func level_range(t: Dictionary) -> Array:
+	return levels.get(int(t["id"]), [int(t["level_min"]), int(t["level_max"])])
 
 # Bilder und Symbole (NPCTaskInfo.lua, QuestList.txt); aui: aui_manager.gd für Texturen
 func set_ui(aui) -> void:
@@ -140,7 +171,8 @@ func can_deliver(id: int) -> bool:
 	if done.has(id) and not t["can_redo"]:
 		return false
 	var lv = int(player.get("level", 1))
-	if (t["level_min"] != 0 and lv < t["level_min"]) or (t["level_max"] != 0 and lv > t["level_max"]):
+	var range = level_range(t)
+	if (range[0] != 0 and lv < range[0]) or (range[1] != 0 and lv > range[1]):
 		return false
 	if not t["races"].is_empty() and not int(player.get("race", 0)) in t["races"]:
 		return false
@@ -150,12 +182,43 @@ func can_deliver(id: int) -> bool:
 	if (g == 1 and int(player.get("gender", 0)) != 0) or (g == 2 and int(player.get("gender", 0)) != 1):
 		return false
 	for pre in t["premise_tasks"]:
-		if not done.has(int(pre)):
+		if not done.has(int(pre)) and not DONE_BY_DEFAULT.has(int(pre)):
+			return false
+	for it in t.get("premise_items", []): # Gegenstände in der Tasche (z.B. Prüfungs-Essenzen für den Tausch)
+		if int(item_count.call(int(it["id"]))) < int(it["num"]):
 			return false
 	for m in tasks.field(t, "m_ulMutexTasks"):
 		if int(m) != 0 and (active.has(int(m)) or done.has(int(m))):
 			return false
-	return true
+	var co = int(tasks.field(t, "m_ulPremise_Cotask_Cnt"))
+	if co > 0:
+		var ids = (tasks.field(t, "m_ulPremise_Cotask") as Array).slice(0, co).filter(func(x): return int(x) != 0)
+		var running = ids.filter(func(x): return active.has(int(x))).size()
+		if (running < ids.size()) if int(tasks.field(t, "m_ulCoTaskCond")) != 0 else running == 0:
+			return false
+	return buffs_ok(tasks.buff_list(tasks.field(t, "m_PremBuff"), int(tasks.field(t, "m_ulPremBuffCnt"))), bool(tasks.field(t, "m_bPremBuffCond")))
+
+# Zustand einer Fenster-Quest für Shylias Markt (wie GameApi.GetTaskStatus): 2 annehmbar, 4 erledigt (nicht wiederholbar),
+# 1 sonst
+func award_state(id: int) -> int:
+	if id == 0 or tasks == null:
+		return 1
+	if can_deliver(id):
+		return 2
+	var t = task(id)
+	return 4 if done.has(id) and not t.is_empty() and not t["can_redo"] else 1
+
+# Effekt-Bedingung [[ID, Mindest-Stufe, muss haben]] gegen die eigenen Effekte (wie quests.gd buffs_ok)
+func buffs_ok(list: Array, all: bool) -> bool:
+	if list.is_empty():
+		return true
+	var mine: Array = my_buffs.call()
+	var hits = 0
+	for e in list:
+		var has = mine.any(func(b): return int(b[0]) == int(e[0]) and (int(e[1]) == 0 or int(b[1]) >= int(e[1])))
+		if has == bool(e[2]):
+			hits += 1
+	return hits == list.size() if all else hits > 0
 
 # Kann der laufende Teil hier abgeschlossen werden? (NPC ansprechen; Warten vorbei)
 func can_finish(id: int) -> bool:
@@ -171,7 +234,15 @@ func can_finish(id: int) -> bool:
 			return _monsters_done(t)
 		2:
 			return t["items"].all(func(i): return int(item_count.call(int(i["id"]))) >= maxi(1, int(i["num"])))
+		METHOD_FINISH_TASK:
+			return _finished_times(t) >= maxi(1, int(tasks.field(t, "m_ulFinishTaskTimes"))) \
+				and buffs_ok(tasks.buff_list(tasks.field(t, "m_FinBuff"), int(tasks.field(t, "m_ulFinBuffCnt"))), bool(tasks.field(t, "m_bFinBuffCond")))
 	return false
+
+# Methode 11: wie oft die gesuchte Quest schon erfüllt wurde, seit diese läuft (Fortschritt n des Servers)
+func _finished_times(t: Dictionary) -> int:
+	var prog = active.get(int(t["id"]), {})
+	return int(prog.get("n", 0)) if prog is Dictionary else 0
 
 # Monster-Ziel erreicht? (Beute in der Tasche bzw. Kills laut Fortschritt)
 func _monsters_done(t: Dictionary) -> bool:
@@ -308,11 +379,16 @@ func trace(npc_name: Callable) -> Array:
 		if t.is_empty() or t["parent"] != 0 or hidden(t):
 			continue
 		var leaf = _running_leaf(t)
+		var talk = int(leaf.get("method", 0)) == METHOD_TALK
+		var done = not talk and can_finish(leaf.get("id", 0))
 		out.append({"id": id, "name": t["name"], "part": leaf.get("name", "") if leaf != t else "",
-			"goal": goal_text(leaf, npc_name), "talk": int(leaf.get("method", 0)) == METHOD_TALK,
-			"npc": int(leaf.get("award_npc", 0)) if int(leaf.get("method", 0)) == METHOD_TALK else 0,
-			"where": first_pos(str(leaf.get("description", ""))) if int(leaf.get("method", 0)) != METHOD_TALK else [],
-			"done": int(leaf.get("method", 0)) != METHOD_TALK and can_finish(leaf.get("id", 0))})
+			"goal": goal_text(leaf, npc_name), "goals": goal_parts(leaf), "talk": talk,
+			"npc": int(leaf.get("award_npc", 0)) if talk else 0,
+			"where": first_pos(str(leaf.get("description", ""))) if not talk else [],
+			"done": done,
+			# Ziel erreicht und beim NPC abzuschließen: "Zurück zu <NPC>" (Link)
+			"back": int(leaf.get("award_npc", 0)) if done and int(leaf.get("finish_type", 0)) != 0 else 0,
+			"back_name": str(npc_name.call(int(leaf.get("award_npc", 0)))) if done and int(leaf.get("award_npc", 0)) != 0 else ""})
 	out.sort_custom(func(a, b): return a["id"] < b["id"])
 	return out
 
@@ -324,16 +400,50 @@ func log_entries(npc_name: Callable, texts: Dictionary) -> Array:
 		e["description"] = format_text(str(t.get("description", "")))
 		var a: Dictionary = t.get("award", {})
 		var parts = []
-		if int(a.get("exp", 0)) != 0:
-			parts.append("%d EXP" % int(a["exp"]))
-		if int(a.get("gold", 0)) != 0:
-			parts.append(texts.get("money", "%d") % int(a["gold"]))
+		var xp = award_exp(a)
+		if xp != 0:
+			parts.append("%d EXP" % xp)
+		var cash = award_money(a)
+		if cash[0] > 0:
+			parts.append(texts.get("money", "%s") % money_text.call(cash[0]))
+		if cash[1] > 0:
+			parts.append(texts.get("bind", "%s") % money_text.call(cash[1]))
 		for g in a.get("items", []):
 			for it in g.get("items", []):
 				parts.append("%s x%d" % [_name(int(it["id"])), maxi(1, int(it["num"]))])
 		e["award"] = ", ".join(parts)
 		e["giveup"] = t.get("can_give_up", false)
 	return out
+
+# Geld einer Belohnung (AWARD_DATA aus angelica_tasks.gd) für die eigene Stufe -> [Goldmünzen, Seelenmünzen] in Kupfer
+func award_money(a: Dictionary) -> Array:
+	var out = [int(a.get("gold", 0)), int(a.get("bind_money", 0))]
+	if not a.get("gold_revise", false):
+		return out
+	var i = mini(int(player.get("level", 1)), maxi(1, int(a.get("gold_revise_lev", 1)))) - 1
+	for k in 2:
+		out[k] = int(out[k] * _factor(k, i) + 1e-6)
+	return out
+
+# EXP einer Belohnung für die eigene Stufe (wie stats.gd task_exp: m_bExpRevise bis Stufe exp_revise_lev, m_bExpFix genau sie)
+func award_exp(a: Dictionary) -> int:
+	var xp = int(a.get("exp", 0))
+	if xp == 0 or not (a.get("exp_revise", false) or a.get("exp_fix", false)):
+		return xp
+	var lev = maxi(1, int(a.get("exp_revise_lev", 1)))
+	var i = (lev if a.get("exp_fix", false) else mini(int(player.get("level", 1)), lev)) - 1
+	return int(xp * _factor(2, i) + 1e-6)
+
+# Faktor je Stufe aus PLAYER_TALENT_CONFIG: 0 Gold, 1 Seelenmünzen, 2 EXP (task_factor); i = Stufe - 1
+func _factor(k: int, i: int) -> float:
+	if _money_factors == null:
+		_money_factors = [[], [], []]
+		var li = elements.list_of("PLAYER_TALENT_CONFIG") if elements != null else -1
+		if li >= 0 and int(elements.lists[li]["count"]) > 0:
+			var r: Dictionary = elements.record(li, 0)
+			_money_factors = [r.get("task_money_factor", []), r.get("task_bind_money_factor", []), r.get("task_factor", [])]
+	var f: Array = _money_factors[k]
+	return float(f[i]) if i >= 0 and i < f.size() else 1.0
 
 func _running_leaf(t: Dictionary) -> Dictionary:
 	for s in t["subs"]:
@@ -352,7 +462,25 @@ func goal_text(t: Dictionary, npc_name: Callable) -> String:
 			return ", ".join(t["monsters"].map(_monster_goal.bind(int(t.get("id", 0)))))
 		2:
 			return ", ".join(t["items"].map(_item_goal))
+		METHOD_FINISH_TASK:
+			var want = int(tasks.field(t, "m_ulFinishTaskID"))
+			var need = maxi(1, int(tasks.field(t, "m_ulFinishTaskTimes")))
+			var wt = task(want)
+			return "%s %d/%d" % [wt.get("name", str(want)), mini(_finished_times(t), need), need] if want != 0 else ""
 	return ""
+
+# Ziel-Teile mit Link für die Autoroute (Z3): Monster "mon:<Vorlage>:<Quest>" (auch Beute-Ziele: das Monster, das sie
+# fallen lässt), Gegenstände "item:<ID>:<Quest>" (Sammelpunkt; den Ort weiß der Server, Anfrage quest_where) -> [{text, link}]
+func goal_parts(t: Dictionary) -> Array:
+	if t.is_empty():
+		return []
+	var id = int(t.get("id", 0))
+	match int(t["method"]):
+		1:
+			return t["monsters"].map(func(m): return {"text": _monster_goal(m, id), "link": "mon:%d:%d" % [int(m["id"]), id]})
+		2:
+			return t["items"].map(func(i): return {"text": _item_goal(i), "link": "item:%d:%d" % [int(i["id"]), id]})
+	return []
 
 # Monster-Ziel: Beute in der Tasche ("Beute 3/10") bzw. Kills laut Fortschritt ("Wildschwein 2/5")
 func _monster_goal(m: Dictionary, id: int) -> String:

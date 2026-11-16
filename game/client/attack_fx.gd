@@ -47,6 +47,8 @@ var _flying: Array = [] # {node, att, attacker, target, key, impact, from, t, mo
 var _pending = {} # Instanz-ID des Ziels -> Anzahl ausstehender Wirkungen
 var _after = {} # Instanz-ID des Ziels -> [Callable] nach dem letzten Einschlag
 var built = 0 # gebaute GFX (Test)
+var _event_nodes = {} # Instanz-ID der Figur -> [Node] der laufenden Aktions-Ereignisse (stop_events)
+var _event_gen = {} # Instanz-ID der Figur -> Zähler: stop_events verwirft noch ausstehende Ereignisse
 
 
 func setup(data_root: String) -> String:
@@ -94,19 +96,49 @@ func play(attacker: Node3D, model: Node, action: String, target: Node3D, impact:
 # GFX- und Klang-Ereignisse einer Aktion (Ereignis 100 / 101 der .ecm, Meta action_events der Figur), z.B.
 # der Feuerball in der Hand beim Zaubern: GFX am Haken (BindParent: folgt ihm), TimeSpan ms (-1 = bis die
 # Aktion endet), GfxScale; Klang (sfx\) am Ort der Figur, hörbar bis MaxDist m
-func play_events(fig: Node3D, model: Node, action: String, length: float) -> void:
-	if model == null or importer == null or not model.has_meta("action_events"):
+# total s > length: die Aktion läuft so lange als Schleife (Stadtportal 回城循环: bis zum Ende des Zauberns); GFX ohne
+# TimeSpan bleiben dann bis zum Ende, Klänge ohne Once kommen in jeder Runde wieder; stop_events beendet alles vorher
+func play_events(fig: Node3D, model: Node, action: String, length: float, total: float = 0.0) -> void:
+	if model == null or importer == null or not model.has_meta("action_events") or not is_instance_valid(fig):
 		return
+	var key = fig.get_instance_id()
+	var gen = int(_event_gen.get(key, 0))
+	var loop = total > length and length > 0.05
+	var span = total if loop else length
 	for e in model.get_meta("action_events").get(action, []):
 		var t = int(e.get("start", 0)) / 1000.0
-		if t <= 0.0:
-			_event(e, fig, model, length)
-		else:
-			get_tree().create_timer(t).timeout.connect(_event.bind(e, fig, model, maxf(0.1, length - t)))
+		var times = [t]
+		if loop and int(e["type"]) == 101 and str(e.get("Once", "1")) == "0":
+			while times[-1] + length < total:
+				times.append(times[-1] + length)
+		for at in times:
+			if at <= 0.0:
+				_event(e, fig, model, span, gen)
+			else:
+				get_tree().create_timer(at).timeout.connect(_event.bind(e, fig, model, maxf(0.1, span - at), gen))
 
-func _event(e: Dictionary, fig, model, left: float) -> void:
+# Laufende und ausstehende Aktions-Ereignisse einer Figur beenden (Zaubern abgebrochen, Schleife zu Ende)
+func stop_events(fig: Node) -> void:
+	if not is_instance_valid(fig):
+		return
+	var key = fig.get_instance_id()
+	_event_gen[key] = int(_event_gen.get(key, 0)) + 1
+	for n in _event_nodes.get(key, []):
+		if is_instance_valid(n):
+			n.queue_free()
+	_event_nodes.erase(key)
+
+func _track(fig: Node, n: Node) -> void:
+	var key = fig.get_instance_id()
+	var list: Array = _event_nodes.get(key, []).filter(func(x): return is_instance_valid(x))
+	list.append(n)
+	_event_nodes[key] = list
+
+func _event(e: Dictionary, fig, model, left: float, gen: int = -1) -> void:
 	if not is_instance_valid(fig) or not is_instance_valid(model) or not fig.is_inside_tree():
 		return
+	if gen >= 0 and gen != int(_event_gen.get(fig.get_instance_id(), 0)):
+		return # inzwischen abgebrochen
 	var file = str(e["files"][0])
 	if int(e["type"]) == 101:
 		var stream = importer.source_sound(file)
@@ -120,6 +152,7 @@ func _event(e: Dictionary, fig, model, left: float) -> void:
 		fig.add_child(sp)
 		sp.finished.connect(sp.queue_free)
 		sp.play()
+		_track(fig, sp)
 		return
 	var scene = _scene(file)
 	if scene == null:
@@ -127,7 +160,7 @@ func _event(e: Dictionary, fig, model, left: float) -> void:
 	var node: Node3D = scene.instantiate()
 	node.scale = Vector3.ONE * maxf(0.01, float(e.get("GfxScale", "1")))
 	var span = int(e.get("TimeSpan", "-1"))
-	var life = minf(MAX_EVENT_LIFE, span / 1000.0 if span > 0 else left)
+	var life = minf(maxf(MAX_EVENT_LIFE, left), span / 1000.0 if span > 0 else left)
 	var hook = str(e.get("hook", ""))
 	var sk = model.get_node_or_null("Skeleton3D") as Skeleton3D
 	var bone = _bone(sk, hook) if sk != null and hook != "" else -1
@@ -138,8 +171,10 @@ func _event(e: Dictionary, fig, model, left: float) -> void:
 		ba.add_child(node)
 		node.position = _vec(str(e.get("HookOffset", "")))
 		get_tree().create_timer(life).timeout.connect(ba.queue_free)
+		_track(fig, ba)
 		return
 	add_child(node)
+	_track(fig, node)
 	node.global_position = sk.global_transform * sk.get_bone_global_pose(bone).origin if bone >= 0 else fig.global_position
 	if model is Node3D:
 		node.global_basis = (model as Node3D).global_basis.orthonormalized() * Basis.from_scale(node.scale)

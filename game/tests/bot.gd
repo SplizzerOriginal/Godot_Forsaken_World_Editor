@@ -15,24 +15,27 @@ extends Node
 # nach Klasse, Ziel wählen (NPC, Monster, Spieler, sich selbst, ungültig), Chat "Sagen" mit
 # Wortfilter, zu lang / leer / falscher Kanal, Flutbremse; Quests: erste Menschen-Quest 5678 wird
 # automatisch vergeben, Teile bei Lady Vestry / Adam / Lady Vestry abschließen (falscher NPC, zu weit,
-# Folgequest zu früh), Belohnung 40 EXP + Rüstung, Folgequest 5679 annehmen, nicht aufgebbar,
+# Folgequest zu früh), Belohnung 120 EXP (40 * Stufenfaktor, Z5) + Rüstung, Folgequest 5679 annehmen, nicht aufgebbar,
 # Zustand nach Neuanmeldung; "Dauerheld" schließt den ersten Teil ab, nach Server-Neustart
 # (--expect-existing) steht er beim zweiten); Inventar (Schritt 10b): leer mit 24 Plätzen, Rüstung
 # der Belohnung anlegen (MP / Verteidigung steigen, D sieht player_equip), bei Johnny den ersten Teil
 # von 5679, am Waffenregal sammeln (zu weit, ohne Quest am Magier-Regal, doppelt), Schwert in der
 # Tasche, anlegen (Angriff / HP), ablegen und verschieben, wieder anlegen, 5679 bei Johnny abschließen
-# (Stufe 2), Ausrüstung nach Neuanmeldung; jede Rasse / Klasse mit Startvorlage bekommt beim Betreten
+# (Stufe 3), Ausrüstung nach Neuanmeldung; jede Rasse / Klasse mit Startvorlage bekommt beim Betreten
 # ihre Einstiegsquest (START_QUESTS, Werwölfe 15356 "Andere Welt": automatisch laut Server-tasks.data);
 # Fertigkeiten: Startfertigkeiten (neu), Schnellleisten belegen / leeren, fremde Fertigkeit / ungültige Plätze
 # abgewiesen, skill_seen, Leisten und neue Fertigkeiten nach Neuanmeldung;
 # Kampf (Schritt 9): NPC / Unbekanntes nicht angreifbar, Quest 5680 bei Johnny, Wildschweine angreifen
-# (Treffer, Gegenangriff, Tod, kill mit 6 EXP, Beute 14533), zehnmal, 5680 bei Lady Vestry abschließen
-# (Beute eingezogen, 100 EXP); D lockt drei Giftjagdhunde an, stirbt (die), kann weder angreifen noch
+# (Treffer, Gegenangriff, Tod, kill mit 6 EXP und 0 - 3 Kupfer Seelenmünzen (Z4), Beute 14533), zehnmal, 5680 bei Lady
+# Vestry abschließen; Seelenmünzen überdauern die Neuanmeldung; Z5: Essenz-Geschenke, Tausch im Markt, Cocktail trinken
+# (Beute eingezogen, 600 EXP); D lockt drei Giftjagdhunde an, stirbt (die), kann weder angreifen noch
 # laufen, steht am Wiederbelebungspunkt mit 10 % HP wieder auf.
 # Fertigkeiten einsetzen (F2): Werte von Hieb (info), unbekannt / noch nicht umgesetzt / NPC / zu weit
 # abgewiesen, Hieb auf ein Wildschwein (Zaubern 1 s, Treffer mit skill, Mana, Abklingzeit), während des
 # Zauberns und in der Abklingzeit abgewiesen, Bewegen bricht ab. Statuseffekte (F3): ein Magier brennt mit
 # Feuerball ein Wildschwein (buffs, Ziel-Info, Schaden über Zeit, Abschuss durch den Brand bzw. Ende nach 5 s).
+# Kontrolle (F5): Eispfeil wurzelt ein Wildschwein 3 s, Betäuben per Testbefehl debug_state (eigene Figur: Bewegen,
+# Angriff, Feuerball gesperrt; Wildschwein: schlägt nicht zu).
 # Dazu das feste Konto "Bot_Dauer" mit der Figur "Dauerheld" (Passwort zufällig, in user://bot.cfg):
 # mit --expect-existing müssen beide schon existieren - so zeigt ein zweiter Lauf nach
 # Server-Neustart, dass Konten und Figuren bleiben.
@@ -60,6 +63,10 @@ const SWORD = 15612
 const ARMOR = 15613
 const BOAR = 14563 # Wildschwein (Quest 5680, Beute 14533)
 const BOAR_LOOT = 14533
+const HEAL_STATE = 979 # 通用-治疗: heilt sofort um den Wert (Testbefehl debug_state)
+const ESSENCE = 36667 # Prüfungs-Essenz (Geschenk je Stufe, Z5)
+const COCKTAIL = 9056 # Orangener EXP-Cocktail (Tausch 12784, Würfel-Quest 4218: 40 EXP * Stufenfaktor)
+const TASK_FACTOR = [3, 5, 6, 7, 8, 9, 11, 12, 14, 16] # PLAYER_TALENT_CONFIG task_factor, Stufe 1 - 10
 const HOUND = 14578 # Giftjagdhund, Stufe 6, gut 170 m östlich
 const HOUNDS_AT = Vector3(20.0, 82.0, 84.0)
 const REVIVE_AT = Vector3(-151.0, 102.0, 42.0) # town_pos der Menschen (start_roles.json)
@@ -287,6 +294,8 @@ func _world() -> void:
 	_check_true("Position nach Neuanmeldung gespeichert", absf(back[0] - pos.x) < 0.01 and absf(back[2] - pos.z) < 0.01)
 	_check_true("Stufe und EXP nach Neuanmeldung gespeichert (%s, %s / %s)" % [r["data"]["char"].get("level"), r["data"].get("exp"),
 		_last_stats.get("exp")], r["data"]["char"].get("level") == _last_stats.get("level") and r["data"].get("exp") == _last_stats.get("exp"))
+	_check_true("Seelenmünzen nach Neuanmeldung gespeichert (%s / %s)" % [r["data"].get("bind_money"), _last_stats.get("bind_money")],
+		int(r["data"].get("bind_money", -1)) == int(_last_stats.get("bind_money", -2)) and int(_last_stats.get("bind_money", 0)) > 0)
 	_check_true("Ausrüstung nach Neuanmeldung (char_enter equip %s)" % str(r["data"].get("equip")),
 		r["data"].get("equip", []).has([0, SWORD]) and r["data"].get("equip", []).has([3, ARMOR]))
 	r = await c.world_ready()
@@ -294,21 +303,29 @@ func _world() -> void:
 	_check_true("Quests nach Neuanmeldung: 5678, 5679 und 5680 erledigt (%s)" % str(qa.get("done")),
 		5678 in qa.get("done", []) and 5679 in qa.get("done", []) and 5680 in qa.get("done", []))
 	var sk: Dictionary = r["data"].get("skills", {})
+	# 5680 "Wetzt Eure Knochen" lehrt die Menschen-Fertigkeit 1958 (Quest-Belohnung, F8): neu dazu (der Segen 2497 kommt erst
+	# ab Stufe 10, Server-tasks.data)
 	_check_true("Schnellleisten und neue Fertigkeiten nach Neuanmeldung (%s, neu %s)" % [str(sk.get("shortcuts")), str(sk.get("new"))],
 		sk.get("shortcuts", []).has([0, 0, 122]) and sk.get("shortcuts", []).has([1, 9, 1581]) and sk.get("shortcuts", []).size() == 2
-		and sk.get("new", []) == [1581])
+		and _sorted(sk.get("new", [])) == [1581, 1958] and sk.get("skills", []).has([1958, 1]) and not sk.get("skills", []).has([2497, 1]))
 	await c.world_leave()
 	c.close()
 	d.close()
+
+# Kopie sortiert (die Datenbank liefert neue Fertigkeiten nach ID, nicht in Lern-Reihenfolge)
+static func _sorted(a: Array) -> Array:
+	var b = a.map(func(x): return int(x))
+	b.sort()
+	return b
 
 # Fertigkeiten des neuen Kriegers: Startfertigkeiten aus der Startvorlage (neu), Stadtportal, Schnellleisten
 func _skills(c: Session, data: Dictionary) -> void:
 	var st: Dictionary = data.get("skills", {})
 	var known = st.get("skills", []).map(func(e): return int(e[0]))
 	var fresh: Array = st.get("new", [])
-	_check_true("Fertigkeiten: Hieb 122, Überfall 1581, Stadtportal 120; neu 122 und 1581, Leisten leer (%s, neu %s)" % [str(known), str(fresh)],
-		known.has(122) and known.has(1581) and known.has(120) and fresh.has(122) and fresh.has(1581) and not fresh.has(120)
-		and st.get("shortcuts", [1]).is_empty())
+	_check_true("Fertigkeiten: Hieb 122, Überfall 1581, Stadtportal 120 (Segen der Menschen 2497 erst ab Stufe 10); neu 122 und 1581, Leisten leer (%s, neu %s)" % [str(known), str(fresh)],
+		known.has(122) and known.has(1581) and known.has(120) and not known.has(2497) and fresh.has(122) and fresh.has(1581)
+		and not fresh.has(2497) and not fresh.has(120) and st.get("shortcuts", [1]).is_empty())
 	_check("Hieb auf die Leiste unten, Platz 1", await c.shortcut(0, 0, 122), Proto.Code.OK)
 	_check("Überfall auf die Leiste rechts, Platz 10", await c.shortcut(1, 9, 1581), Proto.Code.OK)
 	_check("Stadtportal auf Platz 6", await c.shortcut(0, 5, 120), Proto.Code.OK)
@@ -318,14 +335,16 @@ func _skills(c: Session, data: Dictionary) -> void:
 	_check("Platz 11 gibt es nicht", await c.shortcut(0, 10, 122), Proto.Code.SHORTCUT_INVALID)
 	var r = await c.skill_seen([122])
 	_check_true("Hieb aus 'Neue Fertigkeiten' weggelegt, Überfall bleibt neu (%s)" % str(r["data"].get("new")),
-		r["code"] == Proto.Code.OK and r["data"].get("new", []) == [1581])
+		r["code"] == Proto.Code.OK and _sorted(r["data"].get("new", [])) == [1581])
 	var info: Dictionary = st.get("info", {})
 	var hieb: Dictionary = info.get("122", {})
 	_check_true("Werte von Hieb: 18 Mana, 1 s Zauberzeit, 3 s Abklingzeit, Aktion 战士_斩击, einsetzbar (%s)" % str(hieb),
 		hieb.get("mp") == 18 and hieb.get("time") == 1000 and hieb.get("cool") == 3000 and hieb.get("act") == "战士_斩击"
 		and hieb.get("usable") == true and hieb.get("type") == 1)
-	_check_true("Überfall und Stadtportal noch nicht einsetzbar (%s, %s)" % [str(info.get("1581", {}).get("usable")),
-		str(info.get("120", {}).get("usable"))], info.get("1581", {}).get("usable") == false and info.get("120", {}).get("usable") == false)
+	_check_true("Überfall (Ansturm) und Stadtportal einsetzbar (%s, %s; Ansturm move %s, Portal self %s)" % [str(info.get("1581", {}).get("usable")),
+		str(info.get("120", {}).get("usable")), str(info.get("1581", {}).get("move")), str(info.get("120", {}).get("self"))],
+		info.get("1581", {}).get("usable") == true and info.get("120", {}).get("usable") == true
+		and int(info.get("1581", {}).get("move", 0)) == 1 and info.get("120", {}).get("self") == true)
 
 # Statuseffekte (Fertigkeiten-Fahrplan F3): ein Magier setzt Feuerball auf Wildschweine, bis Brennen (583, 50 %)
 # liegt: Meldung buffs mit 583 am Wildschwein, Ziel-Info mit dem Effekt, Schaden über Zeit (hit mit buff 583, 30 je
@@ -352,8 +371,11 @@ func _burn() -> void:
 	await _until(func(): return _npcs(pushes).values().any(func(n): return n["tid"] == BOAR), 5.0)
 	var burned = 0
 	var tries = 0
+	var deaths = 0
 	var has_burn = func(d: Dictionary) -> bool: return d.get("list", []).any(func(e): return int(e[0]) == 583 and e.size() > 4 and int(e[4]) == 8)
-	while burned == 0 and tries < 14: # Erfolg je Versuch knapp 50 % (Brennen, und der Feuerball tötet nicht)
+	# Erfolg je Versuch knapp 50 % (Brennen, und der Feuerball tötet nicht); misslingt er, tötet meist der nächste
+	# Feuerball dasselbe Wildschwein (zählt nicht, hält aber den Magier am Leben): 20 Versuche ~ 10 echte Chancen
+	while burned == 0 and tries < 20:
 		var nc = _npcs(pushes)
 		var boar = 0
 		var best = INF
@@ -367,6 +389,11 @@ func _burn() -> void:
 		at = await _walk(m, at, _npc_at(pushes, boar))
 		var n0 = pushes.size()
 		r = await m.skill_cast(154, boar)
+		if r["code"] == Proto.Code.YOU_ARE_DEAD and deaths < 3: # mehrere Wildschweine schlagen zurück: wiederbeleben
+			deaths += 1
+			tries -= 1
+			at = await _revive_mage(m, at)
+			continue
 		if r["code"] != Proto.Code.OK:
 			_say("Feuerball %d: %s" % [tries, Proto.text(r["code"])])
 			await get_tree().create_timer(1.0).timeout
@@ -402,9 +429,130 @@ func _burn() -> void:
 			var ended = func(): return pushes.any(func(e): return e[0] == "buffs" and int(e[1]["id"]) == burned and e[1]["list"].is_empty())
 			await _until(ended, 6.0)
 			_check_true("Brennen endet nach 5 s (leere Liste)", ended.call())
+	at = await _control(m, pushes, me, at)
 	await m.world_leave()
 	await m.logout()
 	m.close()
+
+# Kontrolle (Fertigkeiten-Fahrplan F5) mit dem Magier: Eispfeil (155) legt immer Frost an (105: Wurzeln 3 s,
+# Sichtbar-Index 25) - das getroffene Wildschwein bleibt stehen statt nachzulaufen, danach verfolgt es den Magier.
+# Testbefehl debug_state (nur Server mit debug_commands, sonst übersprungen): Betäuben (365) der eigenen Figur ->
+# seal, Bewegen -> pos_correct, Normalangriff ATTACK_SEALED, Feuerball SKILL_SEALED, danach wieder frei; ein
+# betäubtes Wildschwein schlägt nicht zu, danach wieder
+# Der Magier ist gestorben (zurückschlagende Wildschweine; zählt nicht als Versuch): wiederbeleben -> neue Position
+func _revive_mage(m: Session, at: Vector3) -> Vector3:
+	var rv = await m.revive()
+	var rp: Array = rv["data"].get("pos", []) if rv["code"] == Proto.Code.OK else []
+	_say("Magier gestorben (Wildschweine), wiederbelebt: %s" % Proto.text(rv["code"]))
+	await get_tree().create_timer(3.0).timeout # etwas Leben zurück
+	return Vector3(rp[0], rp[1], rp[2]) if rp.size() == 3 else at
+
+func _control(m: Session, pushes: Array, me: int, at: Vector3) -> Vector3:
+	var boar = 0
+	var rooted_at = -1
+	var tries = 0
+	var has_frost = func(e: Array, id: int) -> bool: return e[0] == "buffs" and int(e[1]["id"]) == id and e[1]["list"].any(func(x): return int(x[0]) == 105 and int(x[4]) == 25)
+	var rounds = 0
+	var deaths = 0
+	while rooted_at < 0 and tries < 4 and rounds < 12:
+		rounds += 1
+		tries += 1
+		var nc = _npcs(pushes)
+		var hit_before = {} # vom Feuerball / Brand angeschlagene (wenige HP) nicht nehmen
+		for e in pushes:
+			if e[0] == "hit" and e[1]["src"] == me:
+				hit_before[e[1]["dst"]] = true
+		boar = 0
+		var best = INF
+		for id in nc:
+			if nc[id]["tid"] == BOAR and not hit_before.has(id) and nc[id]["at"].distance_to(at) < best:
+				best = nc[id]["at"].distance_to(at)
+				boar = id
+		if boar == 0:
+			break
+		var bpos = _npc_at(pushes, boar)
+		var flat = Vector2(at.x - bpos.x, at.z - bpos.z)
+		flat = flat.normalized() if flat.length() > 0.1 else Vector2(1, 0)
+		at = await _walk(m, at, bpos + Vector3(flat.x, 0, flat.y) * 12.0) # bleibt 2 m davor: 10 m vom Wildschwein
+		var n0 = pushes.size()
+		var r = await m.skill_cast(155, boar)
+		if r["code"] == Proto.Code.YOU_ARE_DEAD and deaths < 3:
+			deaths += 1
+			tries -= 1
+			at = await _revive_mage(m, at)
+			continue
+		if r["code"] == Proto.Code.SKILL_COOLDOWN:
+			tries -= 1 # Abklingzeit des Eispfeils abwarten (zählt nicht als Versuch)
+			await get_tree().create_timer(2.0).timeout
+			continue
+		if r["code"] != Proto.Code.OK:
+			_say("Eispfeil %d: %s" % [tries, Proto.text(r["code"])])
+			await get_tree().create_timer(2.0).timeout
+			continue
+		await _until(func(): return pushes.slice(n0).any(func(e): return e[0] == "skill_end" and e[1]["src"] == me), 4.0)
+		await get_tree().create_timer(0.2).timeout
+		for i in range(n0, pushes.size()):
+			if has_frost.call(pushes[i], boar):
+				rooted_at = i
+				break
+		if pushes.slice(n0).any(func(e): return e[0] == "npc_leave" and e[1]["die"] and boar in e[1]["ids"]):
+			rooted_at = -1 # der Eispfeil hat es getötet (Krit): nächstes
+	_check_true("Eispfeil (155) legt Frost (105, Sichtbar-Index 25) auf ein Wildschwein (Versuch %d)" % tries, rooted_at >= 0)
+	if rooted_at < 0:
+		return at
+	var t0 = Time.get_ticks_msec()
+	var moves = func(from: int) -> Array: return pushes.slice(from).filter(func(e): return e[0] == "npc_move" and e[1]["id"] == boar and Vector3(e[1]["to"][0], e[1]["to"][1], e[1]["to"][2]).distance_to(Vector3(e[1]["pos"][0], e[1]["pos"][1], e[1]["pos"][2])) > 0.5)
+	await get_tree().create_timer(2.0).timeout
+	var during = moves.call(rooted_at).size()
+	var freed = func(): return pushes.slice(rooted_at + 1).any(func(e): return e[0] == "buffs" and int(e[1]["id"]) == boar and not e[1]["list"].any(func(x): return int(x[0]) == 105))
+	await _until(freed, 3.0)
+	var free_ms = Time.get_ticks_msec() - t0
+	var n_free = pushes.size()
+	var struck = func() -> bool: return pushes.slice(n_free).any(func(e): return e[0] == "hit" and e[1]["src"] == boar and e[1]["dst"] == me)
+	await _until(func(): return not moves.call(n_free).is_empty() or struck.call(), 4.0)
+	# (stand es beim Wurzeln schon in Schlagweite - es wanderte gerade auf den Magier zu -, schlägt es statt zu laufen)
+	_check_true("gewurzelt: das getroffene Wildschwein läuft 2 s lang nicht (%d Gänge), nach %d ms frei, dann verfolgt es den Magier (%d Gänge) bzw. schlägt zu (%s)" % [
+		during, free_ms, moves.call(n_free).size(), str(struck.call())], during == 0 and freed.call()
+		and (not moves.call(n_free).is_empty() or struck.call()))
+	# Leben auffüllen (Testbefehl, 979 通用-治疗): bis das Brennen auslöst, können viele Feuerbälle nötig sein, und die
+	# angelockten Wildschweine sollen den betäubten Magier nicht töten
+	await m.debug_state(HEAL_STATE, 0, 1000, [100000])
+	# Testbefehl: die eigene Figur betäuben
+	var n1 = pushes.size()
+	var r = await m.debug_state(365, 0, 3000)
+	if r["code"] == Proto.Code.NOT_ALLOWED:
+		_say("Server ohne debug_commands: Betäuben per Testbefehl übersprungen")
+		return at
+	var sealed = func(): return pushes.slice(n1).any(func(e): return e[0] == "seal" and e[1].get("idle", false))
+	await _until(sealed, 1.0)
+	_check_true("Testbefehl: Betäuben (365) der eigenen Figur -> seal (%s)" % str(r["data"]), r["code"] == Proto.Code.OK
+		and r["data"].get("ok", false) and sealed.call())
+	var n2 = pushes.size()
+	m.send_move(at + Vector3(3, 0, 0), 0.0, Proto.MOVE_RUN)
+	await _until(func(): return pushes.slice(n2).any(func(e): return e[0] == "pos_correct"), 1.0)
+	_check_true("betäubt: Bewegen -> pos_correct", pushes.slice(n2).any(func(e): return e[0] == "pos_correct"))
+	_check("betäubt: Normalangriff", await m.attack(boar), Proto.Code.ATTACK_SEALED)
+	_check("betäubt: Feuerball", await m.skill_cast(154, boar), Proto.Code.SKILL_SEALED)
+	var free = func(): return pushes.slice(n1).any(func(e): return e[0] == "seal" and not e[1].values().has(true))
+	await _until(free, 4.0)
+	r = await m.attack(boar)
+	_check_true("nach 3 s frei (seal ohne Siegel), Normalangriff wieder möglich (%s)" % Proto.text(r["code"]), free.call()
+		and r["code"] == Proto.Code.OK)
+	await m.attack_stop()
+	# ein betäubtes Wildschwein schlägt nicht zu
+	var hit_me = func(from: int) -> bool: return pushes.slice(from).any(func(e): return e[0] == "hit" and e[1]["src"] == boar and e[1]["dst"] == me)
+	await _until(func(): return hit_me.call(n_free), 6.0)
+	if not hit_me.call(n_free):
+		_check_true("das Wildschwein greift den Magier an", false)
+		return at
+	r = await m.debug_state(365, boar, 3000)
+	var n3 = pushes.size()
+	await get_tree().create_timer(2.5).timeout
+	var quiet = not hit_me.call(n3)
+	await _until(func(): return hit_me.call(n3), 4.0)
+	_check_true("Testbefehl: betäubtes Wildschwein schlägt 2,5 s nicht zu (%s), danach wieder" % str(r["data"]),
+		r["code"] == Proto.Code.OK and quiet and hit_me.call(n3))
+	return at
 
 # Für jede Rasse / Klasse eine Figur anlegen, betreten: läuft ihre Einstiegsquest? (danach gelöscht)
 func _start_quests() -> void:
@@ -515,6 +663,12 @@ func _combat(c: Session, pushes: Array, me: int, at: Vector3) -> Vector3:
 				exp_ok = false
 	_check_true("zehn Wildschweine besiegt (%d), je 6 EXP, Beute 14533 x%d" % [kills, bag.call(BOAR_LOOT)], kills == 10 and exp_ok
 		and bag.call(BOAR_LOOT) == 10)
+	# Seelenmünzen (Z4): Wildschwein 1,6 +- 1,28 Kupfer -> je 0 - 3, zusammen im Stand (stats bind_money)
+	var coins = pushes.filter(func(e): return e[0] == "kill").map(func(e): return int(e[1].get("bind", -1)))
+	var bind_now = int(_stat_of(pushes, "bind_money", -1))
+	var coin_sum = coins.reduce(func(a, b): return a + b, 0)
+	_check_true("Seelenmünzen der Wildschweine je 0 - 3 Kupfer %s, zusammen %d = Stand %d" % [str(coins), coin_sum, bind_now],
+		coins.size() >= 10 and coins.all(func(x): return x >= 0 and x <= 3) and coin_sum > 0 and bind_now == coin_sum)
 	at = await _walk(c, at, _npc_at(pushes, vestry))
 	r = await c.quest_complete(vestry, 5680)
 	_check("5680 bei Lady Vestry abschließen", r, Proto.Code.OK)
@@ -525,13 +679,56 @@ func _combat(c: Session, pushes: Array, me: int, at: Vector3) -> Vector3:
 		if e[0] == "quest_event" and e[1]["id"] == 5680 and e[1]["kind"] == "done":
 			ev = e[1]
 	await get_tree().create_timer(0.3).timeout
-	_check_true("5680 erfüllt: 100 EXP, vier Gegenstände, Beute eingezogen (%s, Beute %d)" % [str(ev), bag.call(BOAR_LOOT)],
-		ev.get("exp") == 100 and ev.get("items", []).size() == 4 and bag.call(BOAR_LOOT) == 0)
+	_check_true("5680 erfüllt: 600 EXP (100 * 6 auf Stufe 3), vier Gegenstände, Beute eingezogen, keine Seelenmünzen (9 * Faktor Stufe 2 < 1) (%s, Beute %d)" % [
+		str(ev), bag.call(BOAR_LOOT)], ev.get("exp") == 600 and ev.get("items", []).size() == 4 and bag.call(BOAR_LOOT) == 0
+		and int(ev.get("bind", 0)) == 0)
 	at = await _cast(c, pushes, me, at)
+	await _essence(c, pushes)
 	for e in pushes:
 		if e[0] == "stats":
 			_last_stats = e[1]
 	return at
+
+# Z5: Essenz-Geschenke je Stufe (ab Stufe 3 je eine), Tausch in Shylias Markt (Fenster-Quest ohne NPC, Essenz eingezogen),
+# Cocktail trinken (item_use, 2 s, use_end, Würfel-Quest 4218 mit 40 EXP * Stufenfaktor); Gelber Cocktail erst ab Stufe 20,
+# NPC-Quest ohne NPC abgewiesen, Essenz lässt sich nicht benutzen
+func _essence(c: Session, pushes: Array) -> void:
+	var last_bag = func() -> Array:
+		for i in range(pushes.size() - 1, -1, -1):
+			if pushes[i][0] == "inventory":
+				return pushes[i][1].get("bag", [])
+		return []
+	var count = func(id: int) -> int: return last_bag.call().filter(func(e): return int(e[1]) == id).reduce(func(a, e): return a + int(e[2]), 0)
+	var pos_of = func(id: int) -> int:
+		for e in last_bag.call():
+			if int(e[1]) == id:
+				return int(e[0])
+		return -1
+	var lvl = int(_stat_of(pushes, "level", 0))
+	var ess = count.call(ESSENCE)
+	_check_true("Essenz-Geschenke bis Stufe %d: %d (Stufe 3, 4, 5 je eine)" % [lvl, ess], lvl >= 5 and ess == 3)
+	_check("Gelber Cocktail (12785) erst ab Stufe 20", await c.quest_accept(0, 12785), Proto.Code.QUEST_CONDITIONS)
+	_check("NPC-Quest 5681 ohne NPC", await c.quest_accept(0, 5681), Proto.Code.QUEST_NOT_HERE)
+	_check("Essenz benutzen", await c.item_use(pos_of.call(ESSENCE)), Proto.Code.ITEM_NOT_USABLE)
+	var r = await c.quest_accept(0, 12784)
+	_check("Tausch 12784 im Markt (Fenster-Quest, ohne NPC)", r, Proto.Code.OK)
+	await _until(func(): return count.call(COCKTAIL) == 1, 3.0)
+	_check_true("Essenz eingezogen (%d), Orangener EXP-Cocktail in der Tasche (%d)" % [count.call(ESSENCE), count.call(COCKTAIL)],
+		count.call(ESSENCE) == ess - 1 and count.call(COCKTAIL) == 1)
+	lvl = int(_stat_of(pushes, "level", 0))
+	var n0 = pushes.size()
+	r = await c.item_use(pos_of.call(COCKTAIL))
+	_check_true("Cocktail benutzen: %s, %s s" % [Proto.text(int(r["code"])), str(r["data"].get("time"))], r["code"] == Proto.Code.OK and int(r["data"].get("time", 0)) == 2)
+	var ended = func(): return pushes.slice(n0).any(func(e): return e[0] == "use_end")
+	await _until(ended, 5.0)
+	await get_tree().create_timer(0.3).timeout
+	var ue = pushes.slice(n0).filter(func(e): return e[0] == "use_end")
+	var ev = pushes.slice(n0).filter(func(e): return e[0] == "quest_event" and int(e[1]["id"]) == 4218 and e[1]["kind"] == "done")
+	var want = 40 * int(TASK_FACTOR[clampi(lvl, 1, TASK_FACTOR.size()) - 1])
+	_check_true("getrunken (use_end ok %s): Quest 4218 gibt %s EXP (40 * Faktor Stufe %d = %d), Cocktail weg (%d)" % [
+		str(ue[0][1].get("ok")) if not ue.is_empty() else "-", str(ev[0][1].get("exp")) if not ev.is_empty() else "-", lvl, want,
+		count.call(COCKTAIL)], not ue.is_empty() and ue[0][1].get("ok", false) and not ev.is_empty() and int(ev[0][1].get("exp", 0)) == want
+		and count.call(COCKTAIL) == 0)
 
 # Fertigkeiten einsetzen (Fertigkeiten-Fahrplan F2): fremde / noch nicht umgesetzte Fertigkeit, Ziel NPC, zu
 # weit; Hieb auf ein Wildschwein: erst durch Bewegen abgebrochen (keine Wirkung), dann Zauberzeit 1 s,
@@ -551,7 +748,6 @@ func _cast(c: Session, pushes: Array, me: int, at: Vector3) -> Vector3:
 	if boar == 0:
 		return at
 	_check("Feuerball (unbekannt) einsetzen", await c.skill_cast(154, boar), Proto.Code.SKILL_UNKNOWN)
-	_check("Überfall (noch nicht umgesetzt) einsetzen", await c.skill_cast(1581, boar), Proto.Code.SKILL_NOT_YET)
 	_check("Hieb auf Lady Vestry", await c.skill_cast(122, vestry), Proto.Code.NO_TARGET)
 	if _npc_at(pushes, boar).distance_to(at) > 8.0:
 		_check("Hieb aus %d m" % int(_npc_at(pushes, boar).distance_to(at)), await c.skill_cast(122, boar), Proto.Code.OUT_OF_RANGE)
@@ -562,10 +758,17 @@ func _cast(c: Session, pushes: Array, me: int, at: Vector3) -> Vector3:
 				return pushes[i][1]
 		return {}
 	var is_end = func(d): return d["src"] == me and d["id"] == 122
-	# Abbruch: zaubern, gleich weglaufen
+	# Abbruch: zaubern, gleich weglaufen (ist das Wildschwein inzwischen weitergewandert - OUT_OF_RANGE -, nachlaufen)
 	var n0 = pushes.size()
 	var t_cast = Time.get_ticks_msec()
-	var r = await c.skill_cast(122, boar)
+	var r = {}
+	for attempt in 3:
+		n0 = pushes.size()
+		t_cast = Time.get_ticks_msec()
+		r = await c.skill_cast(122, boar)
+		if r["code"] != Proto.Code.OUT_OF_RANGE:
+			break
+		at = await _walk(c, at, _npc_at(pushes, boar))
 	var t_reply = Time.get_ticks_msec()
 	var away = at + Vector3(0.6, 0, 0)
 	c.send_move(away, 0.0, Proto.MOVE_RUN)
@@ -757,13 +960,13 @@ func _quests(c: Session, q: Dictionary, pushes: Array, start: Vector3) -> Vector
 	for e in pushes:
 		if e[0] == "quest_event" and e[1]["id"] == 5678 and e[1]["kind"] == "done":
 			ev = e[1]
-	_check_true("5678 erfüllt: 40 EXP und Rüstung 15613 (%s)" % str(ev), ev.get("exp") == 40 and not ev.get("items", []).is_empty()
+	_check_true("5678 erfüllt: 120 EXP (40 * Stufenfaktor 3, Z5) und Rüstung 15613 (%s)" % str(ev), ev.get("exp") == 120 and not ev.get("items", []).is_empty()
 		and ev["items"][0][0] == 15613)
 	var st = {}
 	for e in pushes:
 		if e[0] == "stats":
 			st = e[1]
-	_check_true("Werte: Stufe 1, 40 / 70 EXP (%s)" % str(st), st.get("level") == 1 and st.get("exp") == 40 and st.get("exp_next") == 70)
+	_check_true("Werte: Stufe 2, 50 / 140 EXP (%s)" % str(st), st.get("level") == 2 and st.get("exp") == 50 and st.get("exp_next") == 140)
 	r = await c.quest_accept(vestry, 5679)
 	_check("Folgequest 5679 'Greift zu den Waffen!' bei Lady Vestry", r, Proto.Code.OK)
 	await _until(func(): return 7994 in active.call(last_state.call()), 3.0)
@@ -804,8 +1007,9 @@ func _weapon(c: Session, pushes: Array, at: Vector3) -> Vector3:
 	_check("Rüstung anlegen (Platz 3)", r, Proto.Code.OK)
 	await _until(func(): return inv.call().get("equip", []).has([3, ARMOR]), 3.0)
 	var st: Dictionary = stats.call()
-	_check_true("mit Rüstung: 561 MP, Verteidigung 94 (%s / %s)" % [st.get("max_mp"), st.get("attr", {}).get("def")],
-		st.get("max_mp") == 561 and st.get("attr", {}).get("def") == 94 and inv.call().get("bag", [1]).is_empty())
+	# Stufe 2 (5678 gibt 120 EXP, Z5): Krieger 526 MP / 62 Verteidigung + Rüstung 61 MP / 34
+	_check_true("mit Rüstung auf Stufe 2: 587 MP, Verteidigung 96 (%s / %s)" % [st.get("max_mp"), st.get("attr", {}).get("def")],
+		st.get("max_mp") == 587 and st.get("attr", {}).get("def") == 96 and inv.call().get("bag", [1]).is_empty())
 	var nc = _npcs(pushes)
 	var johnny = 0
 	var rack = 0
@@ -847,8 +1051,8 @@ func _weapon(c: Session, pushes: Array, at: Vector3) -> Vector3:
 	_check("Schwert anlegen (Platz 0)", r, Proto.Code.OK)
 	await _until(func(): return inv.call().get("equip", []).has([0, SWORD]), 3.0)
 	st = stats.call()
-	_check_true("mit Schwert: 1674 HP, Angriff 296 - 316 (%s / %s)" % [st.get("max_hp"), st.get("attr", {}).get("dmg")],
-		st.get("max_hp") == 1674 and st.get("attr", {}).get("dmg") == [296, 316])
+	_check_true("mit Schwert auf Stufe 2: 1730 HP (1556 + 174), Angriff 301 - 321 (201 + 100 - 120) (%s / %s)" % [st.get("max_hp"), st.get("attr", {}).get("dmg")],
+		st.get("max_hp") == 1730 and st.get("attr", {}).get("dmg") == [301, 321])
 	r = await c.unequip(0, 5)
 	_check_true("Schwert ablegen an Taschenplatz 5 (%s)" % str(r["data"]), r["code"] == Proto.Code.OK and r["data"].get("pos") == 5)
 	await _until(func(): return bag_pos.call(SWORD) == 5, 3.0)
@@ -867,8 +1071,8 @@ func _weapon(c: Session, pushes: Array, at: Vector3) -> Vector3:
 	var done = func(): return pushes.any(func(e): return e[0] == "quest_event" and e[1]["id"] == 5679 and e[1]["kind"] == "done")
 	await _until(done, 3.0)
 	st = stats.call()
-	_check_true("5679 erfüllt: Stufe 2, 10 / %s EXP, volle HP %s" % [st.get("exp_next"), st.get("max_hp")], done.call()
-		and st.get("level") == 2 and st.get("exp") == 10 and st.get("hp") == st.get("max_hp") and st.get("max_hp") > 1674)
+	_check_true("5679 erfüllt (40 * 5 EXP): Stufe 3, 110 / %s EXP, volle HP %s" % [st.get("exp_next"), st.get("max_hp")], done.call()
+		and st.get("level") == 3 and st.get("exp") == 110 and st.get("hp") == st.get("max_hp") and st.get("max_hp") > 1730)
 	return at
 
 # Ort eines NPCs nach den Meldungen (Ziel, wenn er läuft)

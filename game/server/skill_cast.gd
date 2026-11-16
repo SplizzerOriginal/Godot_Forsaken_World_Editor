@@ -19,10 +19,24 @@ extends RefCounted
 #            Statuseffekte (buffs.gd): eigene Plätze beim Wirken, Ziel-Plätze nur bei einem Treffer (vor dem
 #            Schaden), Erfolg / Dauer / Werte aus den Formeln. Element (damagetype), Meisterschaft / Widerstand fehlen.
 #   Abbruch  Bewegen (moved, waagrecht > MOVE_CANCEL) oder skill_cancel, solange die laufende Prozedur abbrechbar ist (cancel,
-#            Prozedur 1 meist "1"); Tod; Ziel gestorben / verschwunden vor der Wirkung.
-# Umgesetzt (usable): Angriff / Fluch (type 1 / 3) auf ein Ziel (approach 0 / 11), von Hand (use 2),
-# ohne Bewegung (move_mode 0). Der Normalangriff pausiert während des Zauberns.
+#            Prozedur 1 meist "1"); Tod; Ziel gestorben / verschwunden vor der Wirkung; Schweigen / Betäuben (buffs.gd);
+#            Effekt break (interrupt) mit der Chance break der laufenden Prozedur in %.
+#   Siegel   schweigend / betäubt nur Fertigkeiten mit dizzy_usable, entwaffnet nur mit handfree_usable (Formeln,
+#            SkillStub dizzyusable / handfreeusable) -> sonst SKILL_SEALED; ein unverwundbares Ziel nimmt weder Schaden
+#            noch Ziel-Effekte (hit mit immune).
+# Umgesetzt (usable): Angriff / Fluch (type 1 / 3) auf ein Monster (approach 0 / 11), Stärkung (type 2) auf einen
+# Spieler bzw. sich selbst (approach 0) oder nur sich selbst (approach 5 Punkt), von Hand (use 2), ohne Bewegung
+# (move_mode 0) oder mit Ansturm zum Ziel (move_mode 1). Der Normalangriff pausiert während des Zauberns.
+# Ziel (_resolve, wie CECHostPlayer beim Einsetzen): Stärkungen treffen den gewählten Spieler in Sicht, ohne ihn
+# (kein Ziel, ein Monster, Zielart 5) die eigene Figur; sie machen keinen Schaden, ihre Ziel-Effekte gehen ohne
+# Treffer-Wurf auf das Ziel. Flüche, deren Formeln weder ratio noch damage setzen (64 von 68 im Dump), machen keinen
+# Schaden: nur Treffer-Wurf und Effekte (hit mit nodmg). Ansturm (Skill::GetMoveMode 1 / SkillMove): beim Wirken
+# läuft der Zaubernde in der Zeit der Prozedur bis vor das Ziel (Meldung skill_move an alle in Sicht); MOVE des
+# Clients bis kurz danach zählt nur als Drehung (world.gd dash_until).
 # Abklingzeiten nur im Speicher (gehen beim Verlassen der Welt verloren).
+# Passiv (use 6, F7): nicht einsetzbar (SKILL_PASSIVE), Dauer-Effekte über apply_passive(s). Schalter (use 7,
+# SwitchOn / TrySwitchOff): einsetzen wie eine Stärkung; seine Effekte auf der eigenen Figur halten ihn an (buffs.gd
+# switch, Meldung skill_switch); erneut eingesetzt schaltet er aus, ohne Kosten und auch in der Abklingzeit.
 # Meldungen: skill_start an die anderen in Sicht, skill_end an alle (auch den Zaubernden), cooldown an
 # den Zaubernden, stats nach dem Mana-Abzug.
 # ====================================================
@@ -32,9 +46,16 @@ const Expr = preload("skill_expr.gd")
 const Buffs = preload("buffs.gd")
 const PLUGIN_SERVER = "res://addons/PWE-Manager/Server/"
 const MIN_TIME = 50 # ms je Prozedur (Skill::FirstRun / Run)
+# Fertigkeiten ohne Aktion im Client: Gebet (1958) hat im Dump 2013 dieselbe Aktion 祈祷_* wie Segen der Menschen (2497,
+# Grundaktion 法师_异度空间 mit 人类种族技能_祈祷.gfx). Im Spiel (neuerer Client) zeigt Gebet keine eigene Aktion, nur das
+# GFX seines Effekts 1113 (light 16 = 策划联入/免疫控制技.gfx an den Füßen: der kleine blaue Kreis, 4,2 s) - Aussage des
+# Spielers (Zwischen-Fahrplan Z2); die Figur läuft dabei weiter.
+const NO_ACTION = {1958: true}
 const SLACK = 1.0 # m Spielraum für die Weite (Position des Clients ist bis 0,1 s alt)
 const MOVE_CANCEL = 0.3 # m: so weit bewegt bricht das Zaubern ab
 const PLAYER_RADIUS = 0.5
+const DASH_GRACE = 300 # ms nach dem Ansturm, in denen MOVE des Clients noch nicht zählt
+const SETS_DAMAGE = "(^|[^.\\w])(ratio|damage)\\s*=[^=]" # Formel setzt Schaden (Flüche meist nicht)
 const DEFAULTS = {"ratio": 1.0, "damage": 0.0, "crit": 0.0, "critdamage": 0.0, "toukonratio": 1.0, "damagetype": 0,
 	"attack": 0, "player.perform": 0, "player.pray": 0}
 
@@ -66,8 +87,11 @@ func load_templates() -> String:
 
 # Lässt sich die Fertigkeit schon einsetzen (Umfang F2)?
 func usable(sk: Dictionary) -> bool:
-	return int(sk["type"]) in [1, 3] and int(sk["range"]["approach"]) in [0, 11] and int(sk["use"]) == 2 \
-		and int(sk["move_mode"]) == 0 and sk["procs"].size() > 0
+	var t = int(sk["type"])
+	var a = int(sk["range"]["approach"])
+	var m = int(sk["move_mode"])
+	return int(sk["use"]) in [2, 7] and sk["procs"].size() > 0 and ((t in [1, 3] and a in [0, 11] and m in [0, 1])
+		or (t == 2 and a in [0, 5, 8] and m == 0))
 
 # Werte einer bekannten Fertigkeit für den Client (Tooltip-Prüfungen, Zauberbalken, Annäherung)
 func info(p: Dictionary, id: int) -> Dictionary:
@@ -78,8 +102,11 @@ func info(p: Dictionary, id: int) -> Dictionary:
 	return {"mp": _mp(sk, ctx), "time": total_time(sk, ctx), "cool": maxi(0, int(Expr.value(sk["cool"], ctx))),
 		"cast": float(Expr.value(sk["cast_dist"], ctx)), "range": float(Expr.value(sk["pray_max"], ctx)),
 		"min": float(Expr.value(sk["pray_min"], ctx)), "type": int(sk["type"]), "approach": int(sk["range"]["approach"]),
-		"instant": int(sk["time_type"]) == 2, "act": action_name(str(sk["actions"].get("0", "")), int(ctx.get("player.action", 0))),
-		"auto": int(sk["autoattack"]) == 0, "usable": usable(sk)}
+		"instant": int(sk["time_type"]) == 2, "act": act_of(sk, ctx),
+		"auto": int(sk["autoattack"]) == 0, "usable": usable(sk), "dizzy": _flag(sk, "dizzy_usable", ctx, 0),
+		"handfree": _flag(sk, "handfree_usable", ctx, 1), "bless": int(sk["type"]) == 2,
+		"self": int(sk["type"]) == 2 and int(sk["range"]["approach"]) in [5, 8], "move": int(sk["move_mode"]),
+		"passive": int(sk["use"]) == 6, "switch": int(sk["use"]) == 7}
 
 func infos(p: Dictionary) -> Dictionary:
 	var out = {}
@@ -97,6 +124,12 @@ func cooldowns(p: Dictionary) -> Dictionary:
 		if int(p["cooldowns"][id]) > now:
 			out[str(id)] = int(p["cooldowns"][id]) - now
 	return out
+
+# Aktion, die der Client spielt (NO_ACTION: keine)
+static func act_of(sk: Dictionary, ctx: Dictionary) -> String:
+	if NO_ACTION.has(int(sk["id"])):
+		return ""
+	return action_name(str(sk["actions"].get("0", "")), int(ctx.get("player.action", 0)))
 
 # Aktion aus der Formel der Fertigkeit ("player.action==1?神族_X:(player.action==2?魔族_X:X)")
 static func action_name(e: String, action: int) -> String:
@@ -131,31 +164,44 @@ func cast(peer: int, p: Dictionary, id, target) -> Array:
 	if not p.get("skills", {}).has(id):
 		return [Proto.Code.SKILL_UNKNOWN, {}]
 	var sk: Dictionary = templates.get(id, {})
+	if not sk.is_empty() and int(sk["use"]) == 6:
+		return [Proto.Code.SKILL_PASSIVE, {}]
+	if not sk.is_empty() and int(sk["use"]) == 7 and buffs != null and buffs.is_switched(p, id):
+		if p.has("cast"):
+			return [Proto.Code.SKILL_BUSY, {}]
+		buffs.switch_off(p, id) # TrySwitchOff: vor allen Prüfungen, ohne Kosten und Abklingzeit
+		log_line.call("Fertigkeit: %s schaltet %d (%s) aus" % [p["name"], id, sk["name"]])
+		return [Proto.Code.OK, {"id": id, "time": 0, "off": true}]
 	if sk.is_empty() or not usable(sk):
 		return [Proto.Code.SKILL_NOT_YET, {}]
+	var level = int(p["skills"][id])
+	var ctx = _ctx(p, sk, level)
+	if (Buffs.sealed(p, "silent") and not _flag(sk, "dizzy_usable", ctx, 0)) \
+			or (Buffs.sealed(p, "disarm") and not _flag(sk, "handfree_usable", ctx, 1)):
+		return [Proto.Code.SKILL_SEALED, {}]
 	if p.has("cast"):
 		return [Proto.Code.SKILL_BUSY, {}]
 	var now = Time.get_ticks_msec()
 	if int(p.get("cooldowns", {}).get(id, 0)) > now:
 		return [Proto.Code.SKILL_COOLDOWN, {}]
-	var nm = world.npc_maps.get(p["map"])
-	var o = nm.objects.get(target) if nm != null and p["npc_seen"].has(target) else null
-	if o == null or o["npc"] or o.get("mine", false) or not o["select"] or int(o["hp"]) <= 0:
+	var tr = _resolve(p, sk, target)
+	if tr.is_empty():
 		return [Proto.Code.NO_TARGET, {}]
-	var level = int(p["skills"][id])
-	var ctx = _ctx(p, sk, level)
 	var cost = _mp(sk, ctx)
 	if int(p["mp"]) < cost:
 		return [Proto.Code.NO_MANA, {}]
-	var mprop = combat.monster_props(nm, o)
-	var dist = p["pos"].distance_to(o["pos"])
-	var reach = PLAYER_RADIUS + float(mprop["size"]) * 0.5
-	if dist > reach + float(Expr.value(sk["pray_max"], ctx)) + SLACK:
-		return [Proto.Code.OUT_OF_RANGE, {}]
-	if dist < float(Expr.value(sk["pray_min"], ctx)):
-		return [Proto.Code.TOO_CLOSE, {}]
+	var o: Dictionary = tr[1]
+	if tr[0] != "self":
+		var dist = p["pos"].distance_to(o["pos"])
+		var reach = PLAYER_RADIUS + float(tr[2]) * 0.5
+		if dist > reach + float(Expr.value(sk["pray_max"], ctx)) + SLACK:
+			return [Proto.Code.OUT_OF_RANGE, {}]
+		if dist < float(Expr.value(sk["pray_min"], ctx)):
+			return [Proto.Code.TOO_CLOSE, {}]
+	var nm = world.npc_maps.get(p["map"])
+	target = int(o["id"])
 	var total = total_time(sk, ctx)
-	var c = {"id": id, "level": level, "target": target, "start": now, "pos": p["pos"], "idx": 0, "ctx": ctx,
+	var c = {"id": id, "level": level, "target": target, "kind": tr[0], "start": now, "pos": p["pos"], "idx": 0, "ctx": ctx,
 		"cost": cost, "cool": maxi(0, int(Expr.value(sk["cool"], ctx))), "done": false}
 	for k in DEFAULTS:
 		ctx[k] = DEFAULTS[k]
@@ -164,7 +210,7 @@ func cast(peer: int, p: Dictionary, id, target) -> Array:
 	var a: Dictionary = p.get("attack", {})
 	if not a.is_empty():
 		a["next"] = maxf(float(a.get("next", 0.0)), (now + total) / 1000.0)
-	var act = action_name(str(sk["actions"].get("0", "")), int(ctx.get("player.action", 0)))
+	var act = act_of(sk, ctx)
 	_to_viewers(p, p["pos"], "skill_start", {"src": p["id"], "id": id, "dst": target, "time": total, "act": act}, false)
 	log_line.call("Fertigkeit: %s setzt %d (%s) auf %d ein, %d ms" % [p["name"], id, sk["name"], target, total])
 	if c["done"]:
@@ -199,6 +245,20 @@ func moved(peer: int, p: Dictionary) -> void:
 		cancel(peer, p, false, "bewegt %.2f m" % d)
 
 
+# Effekt break (BreakSession): unterbricht mit der Chance break (%) der laufenden Prozedur; leer = 0
+func interrupt(peer: int, p: Dictionary) -> bool:
+	var c: Dictionary = p.get("cast", {})
+	if c.is_empty():
+		return false
+	var procs: Array = templates.get(int(c["id"]), {}).get("procs", [])
+	var f = str(procs[mini(int(c["idx"]), procs.size() - 1)].get("break", "")) if not procs.is_empty() else ""
+	var prob = int(Expr.value(f, c["ctx"], 0)) if f.strip_edges() != "" else 0
+	if randi() % 100 >= prob:
+		return false
+	cancel(peer, p, true, "unterbrochen (%d %%)" % prob)
+	return true
+
+
 # ====================================================
 # TAKT (world.gd, vor dem Kampf-Takt)
 # ====================================================
@@ -222,7 +282,7 @@ func tick() -> void:
 			log_line.call("Fertigkeit: %s fertig mit %d" % [p["name"], c["id"]])
 			continue
 		var nm = world.npc_maps.get(p["map"])
-		var o = nm.objects.get(int(c["target"])) if nm != null else null
+		var o = _target_of(p, c)
 		if not c["done"] and (o == null or int(o["hp"]) <= 0):
 			cancel(peer, p, true, "Ziel weg") # vor der Wirkung gestorben / verschwunden
 			continue
@@ -257,13 +317,22 @@ func _perform(peer: int, p: Dictionary, sk: Dictionary, c: Dictionary, nm, o) ->
 	_states(p, p, sk, ctx, true, false) # BlessMe: auf sich, unabhängig vom Treffer
 	if o == null or int(o["hp"]) <= 0:
 		return
-	var mprop = combat.monster_props(nm, o)
-	var reach = PLAYER_RADIUS + float(mprop["size"]) * 0.5 + float(Expr.value(str(sk["range"]["effect_dist"]), ctx, 0.0))
-	if p["pos"].distance_to(o["pos"]) > reach + SLACK:
+	var monster = c.get("kind", "monster") == "monster"
+	var size = float(combat.monster_props(nm, o)["size"]) if monster else PLAYER_RADIUS * 2.0
+	var reach = PLAYER_RADIUS + size * 0.5 + float(Expr.value(str(sk["range"]["effect_dist"]), ctx, 0.0))
+	if o != p and p["pos"].distance_to(o["pos"]) > reach + SLACK:
 		_to_viewers(p, p["pos"], "skill_end", {"src": p["id"], "id": c["id"], "ok": false}, true)
 		p.erase("cast")
 		log_line.call("Fertigkeit: %s - %d verfehlt, Ziel außer Reichweite" % [p["name"], c["id"]])
 		return
+	if not monster: # Stärkung: Treffer (für das Treffer-GFX), Ziel-Effekte auf den Spieler bzw. sich selbst, kein Schaden
+		_to_viewers(p, p["pos"], "hit", {"src": p["id"], "dst": o["id"], "dmg": 0, "miss": false, "crit": false, "bless": true,
+			"hp": o["hp"], "max_hp": o["max_hp"], "skill": c["id"], "elapsed": now - int(c["start"])}, true)
+		_states(p, o, sk, ctx, false, false)
+		return
+	var mprop = combat.monster_props(nm, o)
+	if int(sk["move_mode"]) == 1:
+		_charge(p, o, size, maxi(0, int(c["next"]) - now))
 	var att: Dictionary = combat.player_props(p).duplicate()
 	var ratio = float(ctx.get("ratio", 1.0))
 	var plus = float(ctx.get("damage", 0.0))
@@ -272,7 +341,13 @@ func _perform(peer: int, p: Dictionary, sk: Dictionary, c: Dictionary, nm, o) ->
 	att["hit"] = float(att.get("hit", 0)) + float(ctx.get("attack", 0))
 	att["crit"] = float(att.get("crit", 0)) + 100.0 * float(ctx.get("crit", 0.0))
 	att["crit_dmg"] = float(att.get("crit_dmg", 100)) + 100.0 * float(ctx.get("critdamage", 0.0))
+	if Buffs.sealed(o, "invincible"):
+		combat.hit_monster(peer, p, nm, o, {"dmg": 0, "miss": false, "crit": false, "immune": true}, now / 1000.0,
+			{"skill": c["id"], "elapsed": now - int(c["start"])})
+		return
 	var r = combat.damage(att, Buffs.with_mods(mprop, o))
+	if int(sk["type"]) == 3 and not _sets_damage(sk):
+		r = {"dmg": 0, "miss": r["miss"], "crit": false, "nodmg": true} # Fluch ohne Schaden: nur Treffer und Effekte
 	if not r["miss"]:
 		_states(p, o, sk, ctx, false, r["crit"]) # StateAttack: nur bei Treffer, vor dem Schaden
 	combat.hit_monster(peer, p, nm, o, r, now / 1000.0, {"skill": c["id"], "elapsed": now - int(c["start"])})
@@ -291,7 +366,45 @@ func _states(p: Dictionary, target: Dictionary, sk: Dictionary, ctx: Dictionary,
 		var values = []
 		for x in e["data"]:
 			values.append(float(Expr.value(str(x), ctx, 0.0)) if str(x).strip_edges() != "" else 0.0)
-		buffs.apply(target, p["map"], int(e["id"]), values, int(Expr.value(str(e["time"]), ctx, 0)), chance, p, crit)
+		# Schalter: seine Effekte auf der eigenen Figur halten ihn an (StateFilter SWITCH_BUFF)
+		var extra = {"switch": int(sk["id"])} if int(sk["use"]) == 7 and target == p else {}
+		buffs.apply(target, p["map"], int(e["id"]), values, int(Expr.value(str(e["time"]), ctx, 0)), chance, p, crit, extra)
+
+
+# ====================================================
+# PASSIVE FERTIGKEITEN (F7, SkillStub::OnLearnPassiveSkill)
+# ====================================================
+# Dauer-Effekte einer passiven Fertigkeit (use 6) mit ihrer Stufe auf die Figur: beim Betreten der Welt (passive_event
+# 1 = EVENT_RESET, dann unabhängig von der Klasse) und beim Lernen; eine neue Stufe ersetzt die alte (UndoEffect,
+# TakeEffect). Ohne Erfolgs-Formel 100 %. -> Anzahl angelegter Effekte
+func apply_passive(p: Dictionary, id: int) -> int:
+	var sk: Dictionary = templates.get(id, {})
+	if sk.is_empty() or int(sk["use"]) != 6 or buffs == null or not p.get("skills", {}).has(id):
+		return 0
+	var had = buffs.remove_passive(p, id, false)
+	var ctx = _ctx(p, sk, int(p["skills"][id]))
+	var n = 0
+	for e in sk["states"]:
+		var f = str(e["chance"]).strip_edges()
+		var chance = 100 if f == "" else int(Expr.value(f, ctx, 0))
+		if chance == 0:
+			continue
+		var values = []
+		for x in e["data"]:
+			values.append(float(Expr.value(str(x), ctx, 0.0)) if str(x).strip_edges() != "" else 0.0)
+		var t = int(Expr.value(str(e["time"]), ctx, 0)) if str(e["time"]).strip_edges() != "" else 0
+		if buffs.apply(p, p["map"], int(e["id"]), values, t, chance, p, false, {"passive": id}):
+			n += 1
+	if had > 0 and n == 0:
+		buffs._changed(p)
+	return n
+
+# Alle passiven Fertigkeiten der Figur (Betreten der Welt) -> Anzahl Effekte
+func apply_passives(p: Dictionary) -> int:
+	var n = 0
+	for id in p.get("skills", {}):
+		n += apply_passive(p, int(id))
+	return n
 
 
 # ====================================================
@@ -315,11 +428,72 @@ func _ctx(p: Dictionary, sk: Dictionary, level: int) -> Dictionary:
 	return ctx
 
 # Zauberzeit = Summe der Prozedur-Zeiten (SkillStub::GetTotalCastTime; exetime ist nur ein Anzeigewert)
+# Zauberzeit für Client und Anzeige: Summe der Prozeduren (ohne MIN_TIME, das nur den Takt bestimmt: Sofort-Fertigkeiten
+# wie Gebet melden 0 und zeigen keinen Zauberbalken)
 static func total_time(sk: Dictionary, ctx: Dictionary) -> int:
 	var t = 0
 	for proc in sk["procs"]:
-		t += maxi(MIN_TIME, int(Expr.value(str(proc["time"]), ctx)))
+		t += maxi(0, int(Expr.value(str(proc["time"]), ctx)))
 	return t
+
+# Ziel -> [Art, Objekt, Größe]: Angriff / Fluch ein sichtbares, lebendes Monster ("monster"); Stärkung der gewählte
+# Spieler in Sicht ("player"), sonst die eigene Figur ("self"); [] = kein gültiges Ziel
+func _resolve(p: Dictionary, sk: Dictionary, target: int) -> Array:
+	if int(sk["type"]) == 2:
+		# Zielart 5 (Punkt) und 8 (um sich, Auren: ohne Gruppe nur die eigene Figur) -> immer sich selbst
+		if not int(sk["range"]["approach"]) in [5, 8] and target != int(p["id"]) and p.get("seen", {}).has(target):
+			var o = _player_by_id(target)
+			if o != null and not o.get("dead", false):
+				return ["player", o, PLAYER_RADIUS * 2.0]
+		return ["self", p, 0.0]
+	var nm = world.npc_maps.get(p["map"])
+	var o = nm.objects.get(target) if nm != null and p["npc_seen"].has(target) else null
+	if o == null or o["npc"] or o.get("mine", false) or not o["select"] or int(o["hp"]) <= 0:
+		return []
+	return ["monster", o, float(combat.monster_props(nm, o)["size"])]
+
+func _target_of(p: Dictionary, c: Dictionary):
+	match str(c.get("kind", "monster")):
+		"self":
+			return p
+		"player":
+			return _player_by_id(int(c["target"]))
+	var nm = world.npc_maps.get(p["map"])
+	return nm.objects.get(int(c["target"])) if nm != null else null
+
+func _player_by_id(id: int):
+	for q in world.players.values():
+		if int(q["id"]) == id:
+			return q
+	return null
+
+# Ansturm: in ms bis vor das Ziel (Größen), Meldung skill_move an alle in Sicht (auch den Zaubernden)
+func _charge(p: Dictionary, o: Dictionary, size: float, ms: int) -> void:
+	var flat = Vector2(o["pos"].x - p["pos"].x, o["pos"].z - p["pos"].z)
+	var stop = PLAYER_RADIUS + size * 0.5
+	if flat.length() <= stop:
+		return
+	var dir = flat.normalized()
+	var to = Vector3(o["pos"].x - dir.x * stop, o["pos"].y, o["pos"].z - dir.y * stop)
+	var now = Time.get_ticks_msec()
+	p["pos"] = to
+	p["dir"] = atan2(dir.x, dir.y)
+	p["t"] = now
+	p["dash_until"] = now + ms + DASH_GRACE
+	_to_viewers(p, to, "skill_move", {"id": p["id"], "pos": [to.x, to.y, to.z], "time": ms}, true)
+	log_line.call("Fertigkeit: %s stürmt %.1f m zum Ziel" % [p["name"], flat.length() - stop])
+
+# Setzt eine Formel der Fertigkeit ratio oder damage (sonst macht ein Fluch keinen Schaden)?
+func _sets_damage(sk: Dictionary) -> bool:
+	if not sk.has("_sets_damage"):
+		var re = RegEx.create_from_string(SETS_DAMAGE)
+		sk["_sets_damage"] = sk["procs"].any(func(pr): return re.search(str(pr.get("calc", ""))) != null)
+	return sk["_sets_damage"]
+
+# Ja / Nein-Feld einer Fertigkeit (Zahl oder Formel), leer = Standard
+static func _flag(sk: Dictionary, key: String, ctx: Dictionary, default: int) -> bool:
+	var f = str(sk.get(key, "")).strip_edges()
+	return int(Expr.value(f, ctx, default)) != 0 if f != "" else default != 0
 
 func _mp(sk: Dictionary, ctx: Dictionary) -> int:
 	return maxi(0, int(Expr.value(str(sk["mp"]), ctx)))

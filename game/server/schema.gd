@@ -5,11 +5,15 @@ extends RefCounted
 # user_version); neue Änderungen nur hinten anfügen, nie alte ändern.
 #   accounts    Konten (Passwort nur als Hash, siehe accounts.gd), Sperre
 #   characters  Figuren je Konto (Platz, Rasse / Klasse / Geschlecht wie clsconfig, Aussehen
-#               als JSON, Welt-Nummer aus gs.conf, Client-Map, Position, Richtung)
+#               als JSON, Welt-Nummer aus gs.conf, Client-Map, Position, Richtung; Geld in Kupfer:
+#               money = Goldmünzen, bind_money = Seelenmünzen, seit Version 5)
 #   inventory   Gegenstände (Ort 0 Tasche, 1 Ausrüstung, 2 Lager; Platz; elements-ID; Anzahl)
 #   quests      Quest-Zustand je Figur (1 aktiv, 2 abgegeben, 3 gescheitert), Fortschritt als JSON
 #   skills      bekannte Fertigkeiten je Figur (Stufe, new = noch im Fenster "Neue Fertigkeiten")
 #   shortcuts   Schnellleisten je Figur (Leiste, Platz, Fertigkeit)
+#   buffs       Effekte, die das Abmelden überdauern (offline_save, z.B. die 30-min-Rassen-Segen): Reihenfolge, Effekt,
+#               Zaubernder, Stapel, Restzeit ms (-1 = ohne Ende), Gesamtzeit ms, Werte der Wirkungen (JSON), gespeichert
+#               (Unix-Zeit; offline_timing: die Zeit läuft auch abgemeldet)
 # Zeiten als Unix-Zeit (Sekunden).
 # ====================================================
 
@@ -86,6 +90,23 @@ const MIGRATIONS = [
 		skill_id INTEGER NOT NULL,
 		PRIMARY KEY (character_id, bar, slot)
 	);
+	""",
+	"""
+	CREATE TABLE buffs (
+		character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+		slot INTEGER NOT NULL,
+		state_id INTEGER NOT NULL,
+		src INTEGER NOT NULL DEFAULT 0,
+		stack INTEGER NOT NULL DEFAULT 1,
+		left_ms INTEGER NOT NULL,
+		time_ms INTEGER NOT NULL,
+		vals TEXT NOT NULL DEFAULT '[]',
+		saved INTEGER NOT NULL,
+		PRIMARY KEY (character_id, slot)
+	);
+	""",
+	"""
+	ALTER TABLE characters ADD COLUMN bind_money INTEGER NOT NULL DEFAULT 0;
 	""",
 ]
 

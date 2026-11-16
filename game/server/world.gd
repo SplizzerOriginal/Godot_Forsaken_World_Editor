@@ -34,10 +34,14 @@ extends RefCounted
 # Kampf: combat.gd (setzt der Server) jeden Takt nach den NPCs; eine tote Figur (dead) kann sich nicht
 # bewegen (pos_correct), player_enter enthält dead.
 # Statuseffekte: buffs.gd; kommt eine Figur / ein Monster mit Effekten in Sicht, folgt auf player_enter /
-# npc_enter eine Meldung buffs (GFX am Modell).
+# npc_enter eine Meldung buffs (GFX am Modell). Gewurzelt / betäubt (Siegel root) darf die Figur nur die Richtung
+# ändern: ein MOVE an einen anderen Ort -> pos_correct. Ein angehaltenes Monster (Ziel null) meldet npc_move mit
+# to = Ort (der Client bleibt dort stehen).
 # ====================================================
 
 const Proto = preload("../common/protocol.gd")
+const Buffs = preload("buffs.gd")
+const ROOT_SLACK = 0.05 # m: so viel darf sich eine gewurzelte Figur noch bewegen (Rundung, Fallen)
 const SPEED_TOLERANCE = 1.6
 const SLACK = 1.5
 const MAX_FALL_SPEED = 40.0
@@ -84,7 +88,7 @@ func enter(peer: int, info: Dictionary) -> void:
 	players[peer] = {"id": c["id"], "name": c["name"], "race": c["race"], "gender": c["gender"], "class": c["class"],
 		"level": int(c.get("level", 1)), "hp": int(info.get("hp", 1)), "max_hp": int(info.get("max_hp", info.get("hp", 1))),
 		"mp": int(info.get("mp", 0)), "max_mp": int(info.get("max_mp", info.get("mp", 0))),
-		"exp": int(info.get("exp", 0)), "money": int(info.get("money", 0)),
+		"exp": int(info.get("exp", 0)), "money": int(info.get("money", 0)), "bind_money": int(info.get("bind_money", 0)),
 		"appearance": c["appearance"], "map": info["map"], "world": info["world"],
 		"pos": Vector3(pos[0], pos[1], pos[2]), "dir": float(info["dir"]), "state": Proto.MOVE_STAND,
 		"t": Time.get_ticks_msec(), "seen": {}, "state_sent": {}, "npc_seen": {}, "view_pos": Vector3(INF, 0, 0),
@@ -105,9 +109,10 @@ func leave(peer: int) -> void:
 		return
 	if inventory != null:
 		inventory.cancel_gather(peer, p, npc_maps.get(p["map"]), false)
+		inventory.cancel_use(peer, p, false)
+	save(peer) # auch die Effekte mit offline_save (buffs.store), bevor forget sie verwirft
 	if buffs != null:
 		buffs.forget(p)
-	save(peer)
 	players.erase(peer)
 	for other in players:
 		if players[other]["seen"].has(p["id"]):
@@ -128,6 +133,14 @@ func move(peer: int, pos: Vector3, dir: float, state: int) -> void:
 	var dt = maxf(MIN_DT, (now - p["t"]) / 1000.0)
 	var d: Vector3 = pos - p["pos"]
 	var flat = Vector2(d.x, d.z).length()
+	if now < int(p.get("dash_until", 0)): # Ansturm (skill_cast.gd): der Server kennt den Ort schon, nur die Richtung zählt
+		p["dir"] = wrapf(dir, -PI, PI)
+		return
+	if flat > ROOT_SLACK and Buffs.sealed(p, "root"):
+		net.push(peer, "pos_correct", {"pos": [p["pos"].x, p["pos"].y, p["pos"].z], "dir": wrapf(dir, -PI, PI)})
+		p["dir"] = wrapf(dir, -PI, PI)
+		p["t"] = now
+		return
 	var ok = flat <= (Proto.RUN_SPEED + maxf(0.0, float(p.get("speed_add", 0.0)))) * SPEED_TOLERANCE * dt + SLACK and absf(d.y) <= MAX_FALL_SPEED * dt + SLACK \
 		and absf(pos.x) <= MAP_LIMIT and absf(pos.z) <= MAP_LIMIT and state >= Proto.MOVE_STAND and state <= Proto.MOVE_JUMP
 	if not ok:
@@ -141,6 +154,9 @@ func move(peer: int, pos: Vector3, dir: float, state: int) -> void:
 	var g: Dictionary = p.get("gather", {})
 	if not g.is_empty() and pos.distance_to(g["pos"]) > inventory.GATHER_MOVE:
 		inventory.cancel_gather(peer, p, npc_maps.get(p["map"]), true)
+	var u: Dictionary = p.get("use", {})
+	if not u.is_empty() and pos.distance_to(u["at"]) > inventory.GATHER_MOVE:
+		inventory.cancel_use(peer, p, true)
 	if casting != null and p.has("cast"):
 		casting.moved(peer, p)
 
@@ -238,8 +254,7 @@ func _npc_view(peer: int, p: Dictionary) -> void:
 	for id in nm.moves:
 		if seen.has(id) and now_seen.has(id):
 			var o = nm.objects[id]
-			net.push(peer, "npc_move", {"id": id, "pos": [o["pos"].x, o["pos"].y, o["pos"].z], "to": nm.move_of(o).slice(0, 3),
-				"speed": o["speed"]})
+			net.push(peer, "npc_move", _npc_move(o, nm))
 	if not gone.is_empty():
 		net.push(peer, "npc_leave", {"ids": gone, "die": false})
 	if not dead.is_empty():
@@ -249,6 +264,12 @@ func _npc_view(peer: int, p: Dictionary) -> void:
 	for e in enter:
 		_push_buffs(peer, nm.objects[e[0]])
 	p["npc_seen"] = now_seen
+
+# Meldung npc_move; ohne Ziel (angehalten, z.B. gewurzelt) ist das Ziel der eigene Ort
+static func _npc_move(o: Dictionary, nm) -> Dictionary:
+	var pos = [o["pos"].x, o["pos"].y, o["pos"].z]
+	var to = nm.move_of(o).slice(0, 3)
+	return {"id": o["id"], "pos": pos, "to": to if to.size() == 3 else pos, "speed": maxf(1.0, float(o["speed"])) if to.is_empty() else o["speed"]}
 
 # Figur / Monster mit Statuseffekten kommt in Sicht: buffs wie bei einer Änderung (GFX am Modell, Ziel-Fenster)
 func _push_buffs(peer: int, o: Dictionary) -> void:
@@ -265,8 +286,7 @@ func _npc_changes(peer: int, nm, seen: Dictionary) -> void:
 	for id in nm.moves:
 		if seen.has(id) and nm.objects.has(id):
 			var o = nm.objects[id]
-			net.push(peer, "npc_move", {"id": id, "pos": [o["pos"].x, o["pos"].y, o["pos"].z], "to": nm.move_of(o).slice(0, 3),
-				"speed": o["speed"]})
+			net.push(peer, "npc_move", _npc_move(o, nm))
 	if not dead.is_empty():
 		net.push(peer, "npc_leave", {"ids": dead, "die": true})
 
@@ -372,6 +392,43 @@ func filter_words(text: String) -> String:
 			at = lower.find(w, at + 1)
 	return out.substr(1, out.length() - 2)
 
+# Nächster Ort eines Quest-Ziels (Z3, Anfrage quest_where): "mon" = lebende Figur der Monster-Vorlage id, "item" = Sammelpunkt,
+# der für die Quest quest sammelt (task_in / task_out) oder den Gegenstand id ergibt. Erst die Map des Spielers, sonst die
+# erste andere (world -1: anderes Gebiet) -> {map, world, pos: [x, y, z]} oder {}
+func where_target(p: Dictionary, kind: String, id: int, quest: int) -> Dictionary:
+	var want = {}
+	if kind == "mon":
+		want[id] = true
+	elif inventory != null:
+		for mid in inventory.mines:
+			var m: Dictionary = inventory.mines[mid]
+			if (quest != 0 and (int(m.get("task_out", 0)) == quest or int(m.get("task_in", 0)) == quest)) \
+					or m.get("mat", []).any(func(x): return int(x[0]) == id):
+				want[int(mid)] = true
+	if want.is_empty():
+		return {}
+	var maps = [p["map"]]
+	for m in npc_maps:
+		if m != p["map"]:
+			maps.append(m)
+	for m in maps:
+		var nm = npc_maps.get(m)
+		if nm == null:
+			continue
+		var best = null
+		var best_d = INF
+		for o in nm.objects.values():
+			if not want.has(int(o["tid"])) or bool(o.get("mine", false)) != (kind == "item") or int(o.get("hp", 1)) <= 0:
+				continue
+			var d = (o["pos"] as Vector3).distance_squared_to(p["pos"])
+			if d < best_d:
+				best_d = d
+				best = o
+		if best != null:
+			var pos: Vector3 = best["pos"]
+			return {"map": m, "world": int(p["world"]) if m == p["map"] else -1, "pos": [pos.x, pos.y, pos.z]}
+	return {}
+
 func save(peer: int) -> void:
 	var p = players.get(peer)
 	if p == null:
@@ -380,6 +437,8 @@ func save(peer: int) -> void:
 	if not db.run("UPDATE characters SET map = ?, world = ?, pos_x = ?, pos_y = ?, pos_z = ?, dir = ?, hp = ?, mp = ? WHERE id = ?",
 			[p["map"], p["world"], p["pos"].x, p["pos"].y, p["pos"].z, p["dir"], p["hp"], p["mp"], p["id"]]):
 		log_line.call("FEHLER Datenbank: " + db.last_error)
+	if buffs != null:
+		buffs.store(p)
 
 func save_all() -> void:
 	for peer in players:

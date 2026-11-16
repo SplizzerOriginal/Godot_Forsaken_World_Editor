@@ -28,6 +28,7 @@ const DEFAULTS = {
 		"database": "", # leer = <dir>/game.db
 		"maps": "", # Spawns nur dieser Maps laden (z.B. "s9,s10"), leer = alle
 		"dtls": false,
+		"debug_commands": false, # Testbefehle wie debug_state erlauben (nur Testserver: --debug_commands)
 	},
 }
 

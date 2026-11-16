@@ -131,7 +131,7 @@ func enter(account_id: int, args: Dictionary) -> Array:
 	var char_id = args.get("id")
 	if not char_id is int:
 		return [Proto.Code.BAD_REQUEST, {}]
-	var rows = db.query("SELECT %s, world, pos_x, pos_y, pos_z, dir, hp, mp, exp, money FROM characters "
+	var rows = db.query("SELECT %s, world, pos_x, pos_y, pos_z, dir, hp, mp, exp, money, bind_money FROM characters "
 		% LIST_COLUMNS + "WHERE id = ? AND account_id = ? AND deleted = 0", [char_id, account_id])
 	if rows == null:
 		return [Proto.Code.SERVER_ERROR, {}]
@@ -141,7 +141,7 @@ func enter(account_id: int, args: Dictionary) -> Array:
 	db.run("UPDATE characters SET last_played = ? WHERE id = ?", [_now(), char_id])
 	return [Proto.Code.OK, {"char": _public(r), "world": r["world"], "map": r["map"],
 		"pos": [r["pos_x"], r["pos_y"], r["pos_z"]], "dir": r["dir"], "hp": r["hp"], "mp": r["mp"],
-		"exp": r["exp"], "money": r["money"]}]
+		"exp": r["exp"], "money": r["money"], "bind_money": r["bind_money"]}]
 
 
 # ====================================================

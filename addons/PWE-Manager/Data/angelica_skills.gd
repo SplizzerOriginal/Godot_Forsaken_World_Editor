@@ -38,6 +38,7 @@ var files # angelica_files.gd
 var language = "Deu"
 var host_level = 1
 var host_skills = {} # ID -> Stufe (GameApi.GetHostSkillLevel)
+var host_town = "" # Name der Rückkehrstadt (GameApi.GetHostTownName, Stadtportal-Text); setzt das Spiel
 var skill_class = {} # ID -> Klasse (Symbol-Wahl), setzt das Spiel für bekannte Fertigkeiten
 var errors: Array = []
 var _lua = null
@@ -64,7 +65,10 @@ func open() -> String:
 	_lua.globals["GameApi"] = {"GetHostProp": func(_a): return [{"level": host_level}],
 		"GetHostSkillLevel": func(a): return [int(host_skills.get(int(a[0]) if not a.is_empty() and a[0] != null else 0, 0))],
 		"GetHostBuffLevel": func(_a): return [0], "GetItemNumInPack": func(_a): return [0],
-		"GetHostSubProfLevel": func(_a): return [0], "GetHostRepuValue": func(_a): return [0]}
+		"GetHostSubProfLevel": func(_a): return [0], "GetHostRepuValue": func(_a): return [0],
+		"GetHostTownName": func(_a): return [host_town], "GetHostVIPLevel": func(_a): return [0],
+		"GetHostMastery": func(_a): return [0], "GetHostBeliefValue": func(_a): return [0],
+		"GetHostMoneyInPack": func(_a): return [0]}
 	var names: Array = files.list_dir(dir)["files"].filter(func(f): return f.to_lower().begins_with("skilldesc") and f.to_lower().ends_with(".lua"))
 	names.sort_custom(func(a, b): return a.naturalnocasecmp_to(b) < 0)
 	var order = FIRST.duplicate()
@@ -97,12 +101,13 @@ func skill_name(id: int) -> String:
 	var s = r[0] if r is Array and not r.is_empty() else null
 	return s if s is String and not s.begins_with("GetSkillName Error") else _cn.get(id, str(id))
 
-func desc(id: int, level: int, context: int = CONTEXT_SKILL) -> String:
+# next_req: Figurenstufe der nächsten Lernstufe (9999 = keine; F8), für "nächste Stufe" in der Beschreibung
+func desc(id: int, level: int, context: int = CONTEXT_SKILL, next_req: int = 9999) -> String:
 	if _sd == null:
 		return ""
 	var lv = maxi(1, level)
 	var info = {"level": lv, "baseLevel": lv, "extralevel": 0, "maxLevel": lv, "maxLearnLevel": lv, "nextLevel": lv + 1,
-		"nextRequiredPlayerLevel": 9999, "nextRequiredPlayerSecLevel": 0, "nextCostSp": 0, "bTalent": false,
+		"nextRequiredPlayerLevel": next_req, "nextRequiredPlayerSecLevel": 0, "nextCostSp": 0, "bTalent": false,
 		"costMPReduceRate": 0, "requiredSkillID": 0, "requiredSkillSP": 0, "beliefUIPosH": 0, "beliefUIPosV": 0, "beliefGod": -1}
 	var r = _lua._call(_sd["GetDesc"], [_sd, id, context, info])
 	var s = r[0] if r is Array and not r.is_empty() else null

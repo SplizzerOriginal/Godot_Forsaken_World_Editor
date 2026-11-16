@@ -13,10 +13,16 @@ extends SceneTree
 #   lv (require_level), race (mask_race: Bit = Rasse), prof (character_combo_id: Bit = Klasse, 0 = alle),
 #   gender (require_gender 0 männlich, 1 weiblich, 2 beide), hp, mp, dmg [min, max] (min_dmg,
 #   min_dmg + dmg_val), def (defence), hit (attack = Treffer), range (attack_range)
+# Quest-Würfel (TASKDICE_ESSENCE, z.B. EXP-Cocktail 9056 -> Quest 4218): dice [[Quest, Wahrscheinlichkeit]]
+#   (task_lists), use_time (time_intonate s) - Benutzen per Rechtsklick (inventory.gd use)
+# proc (proc_type, wenn nicht 0): Bits wie CECIvtrItem PROC_*, z.B. 0x400 = nicht zerstörbar (inventory.gd destroy)
 # mines: Sammelpunkte (MINE_ESSENCE): t [min, max] s (time_min / time_max), dist (max_distance),
 #   task_in (Quest nötig), task_out (Quest, an die das Sammeln geht: CheckMining gibt den gesuchten
 #   Gegenstand), mat [[ID, Wahrscheinlichkeit]] (materials), perm (permenent: bleibt stehen), multi
-#   (is_multiple: mehrere zugleich), desc (progress_desc), lv [min, max] (Stufe, wenn vorhanden)
+#   (is_multiple: mehrere zugleich), desc (progress_desc), lv [min, max] (Stufe, wenn vorhanden),
+#   tools [[Werkzeug, verbraucht 0/1, Wahrscheinlichkeit]] (need_tool / tools: ein Werkzeug der Liste muss in der Tasche sein,
+#   wie CECHostPackSet::FindMineTool; z.B. Lagerfeuer 14554 braucht die Ungezündete Fackel 15030, die Kanone 14553 die
+#   Leuchtende Fackel 14556, beide werden verbraucht)
 # ====================================================
 
 const PLUGIN = "res://addons/PWE-Manager/"
@@ -63,6 +69,8 @@ func _initialize() -> void:
 				mines[id] = _mine(r)
 			elif not items.has(id):
 				items[id] = _item(r, l["type"] == "EQUIPMENT_ESSENCE")
+				if l["type"] == "TASKDICE_ESSENCE":
+					_dice(items[id], r)
 	var lines = ["{", "\"source\": %s," % JSON.stringify("%s 0x%x" % [path.get_file(), el.version]),
 		"\"note\": \"tools/server_data/item_templates.gd, Felder siehe dort\","]
 	for part in [["items", items], ["mines", mines]]:
@@ -84,11 +92,26 @@ func _initialize() -> void:
 		print("nicht lesbar: ", ", ".join(skipped))
 	quit(0)
 
+# Quest-Würfel (TASKDICE_ESSENCE, z.B. EXP-Cocktails): Benutzen (Rechtsklick) vergibt eine Quest der Liste
+# task_lists nach Wahrscheinlichkeit; time_intonate s Benutzungszeit, progress_desc Text der Leiste
+static func _dice(o: Dictionary, r: Dictionary) -> void:
+	var list = []
+	for e in r.get("task_lists", []):
+		if int(e.get("id", 0)) != 0 and float(e.get("probability", 0.0)) > 0.0:
+			list.append([int(e["id"]), snappedf(float(e["probability"]), 0.0001)])
+	if list.is_empty():
+		return
+	o["dice"] = list
+	if int(r.get("time_intonate", 0)) > 0:
+		o["use_time"] = int(r["time_intonate"])
+
 func _item(r: Dictionary, equip: bool) -> Dictionary:
 	var o = {}
 	var pile = int(r.get("pile_num_max", 1))
 	if pile > 1:
 		o["pile"] = pile
+	if int(r.get("proc_type", 0)) != 0:
+		o["proc"] = int(r["proc_type"])
 	if not equip:
 		return o
 	for k in EQUIP_FIELDS:
@@ -119,6 +142,13 @@ func _mine(r: Dictionary) -> Dictionary:
 			mat.append([int(m["id"]), snappedf(float(m["probability"]), 0.0001)])
 	if not mat.is_empty():
 		o["mat"] = mat
+	if int(r.get("need_tool", 0)) != 0:
+		var tools = []
+		for t in r.get("tools", []):
+			if int(t.get("tid", 0)) != 0:
+				tools.append([int(t["tid"]), 1 if int(t.get("is_eliminate", 0)) != 0 else 0, snappedf(float(t.get("eliminate_probability", 0.0)), 0.0001)])
+		if not tools.is_empty():
+			o["tools"] = tools
 	if int(r.get("permenent", 0)) != 0:
 		o["perm"] = true
 	if int(r.get("is_multiple", 0)) != 0:

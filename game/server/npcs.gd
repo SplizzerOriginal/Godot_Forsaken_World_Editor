@@ -5,12 +5,14 @@ extends RefCounted
 # npcgenerator / template_loader des gs:
 # Daten (Plugin Server/): data/<Ordner>/npcgen.data (npcgen.gd), npc_templates.json (Werte der
 # Vorlagen aus der elements.data des Servers), data/<Ordner>/terrain.cfg + map/<n>.hmap
-# (heightmap.gd; fehlen sie, bleibt die Höhe des Gebiets).
+# (heightmap.gd; fehlen sie, bleibt die Höhe des Gebiets), data/<Ordner>/movemaps (Wegekarte der Client-Map, server_files.py
+# --client; MAP/angelica_movemap.gd, Bug-Fahrplan B2).
 # Erzeugt werden die Gebiete, deren Steuerung von Anfang an aktiv ist (ohne Steuerung oder
 # "aktiv"); Gebiete, die an ein anderes angehängt sind, liefern diesem nur weitere Bereiche.
 # Je Eintrag "Anzahl" Figuren, jede mit eigener Objekt-ID (ab Proto.NPC_ID_BASE, server-weit):
-#   Ort    zufällig im Bereich (bei mehreren Bereichen einer davon); Gebiet auf dem Terrain:
-#          Höhe = Terrain + Abstand zum Terrain (der gs nimmt dafür die movemap), Box-Gebiet:
+#   Ort    zufällig im Bereich (bei mehreren Bereichen einer davon); Gebiet auf dem Terrain: wie path_finding::GetValidPos
+#          der Boden der begehbaren Ebene der Wegekarte, die zur Höhe des Gebiets passt (floor_y: Höhlen- und Stadtböden
+#          über dem Gelände, z.B. die Zwergenstadt in s9), sonst das Terrain; dazu der Abstand zum Terrain; Box-Gebiet:
 #          zufällige Höhe in der Box, mindestens das Terrain
 #   Blick  Bereich ohne Ausdehnung: Richtung des Gebiets, sonst zufällig
 #   Stufe  level[i] mit Wahrscheinlichkeit level_probability[i] (Monster; NPCs vom Quell-Monster)
@@ -27,7 +29,7 @@ extends RefCounted
 # can_select_by_tab) nach der Vorlage, bei NPCs nach der NPC-Vorlage (Tab nie).
 # Sammelpunkte (Schritt 10b): Sammelgebiete der npcgen (res_areas) mit init_gen und aktiver Steuerung,
 # Vorlagen in mine_templates (inventory.gd mines); je Eintrag "Anzahl" Punkte, zufällig im Gebiet,
-# Höhe = Terrain + Höhe des Eintrags, Ausrichtung wie gmatter: Achse aus dir[0] / dir[1] (je 256 =
+# Höhe = Boden der Wegekarte (wie die Figuren) bzw. Terrain + Höhe des Eintrags, Ausrichtung wie gmatter: Achse aus dir[0] / dir[1] (je 256 =
 # 2 Pi), Drehung rad um sie. Objekte mit mine = true, Stufe 0, wählbar, nicht mit Tab. harvest():
 # verschwindet (nicht perm), Respawn nach refresh des Eintrags (sonst MINE_REFRESH s) bei auto_revive;
 # lock / unlock / busy: wer gerade sammelt.
@@ -49,6 +51,7 @@ const MINE_REFRESH = 30
 var map_name = ""
 var folder = ""
 var terrain = null # heightmap.gd oder null
+var movemap = null # Plugin MAP/angelica_movemap.gd (Server/data/<Ordner>/movemaps) oder null: begehbare Ebenen über dem Gelände
 var objects = {} # ID -> Figur (siehe _spawn)
 var cells = {} # Vector2i -> {ID: true}
 var moves: Array = [] # IDs, die seit dem letzten Verteilen losgelaufen sind
@@ -162,7 +165,8 @@ func _spawn(ai: int, gi: int, now: float) -> int:
 			pos.y += _rng.randf_range(-0.5, 0.5) * ext.y
 	if terrain != null:
 		var h = terrain.height(pos.x, pos.z)
-		pos.y = (h if on_terrain else maxf(pos.y, h)) + float(g["offset_trn"])
+		var fl = floor_y(pos.x, pos.z, pos.y) if on_terrain else NAN
+		pos.y = (fl if not is_nan(fl) else (h if on_terrain else maxf(pos.y, h))) + float(g["offset_trn"])
 	var dir = _rng.randf_range(-PI, PI)
 	var d: Vector3 = region["dir"]
 	if point and Vector2(d.x, d.z).length() > POINT:
@@ -192,7 +196,8 @@ func _spawn_mine(ri: int, ei: int) -> int:
 		pos.x += _rng.randf_range(-0.5, 0.5) * r["ext_x"]
 		pos.z += _rng.randf_range(-0.5, 0.5) * r["ext_z"]
 	if terrain != null:
-		pos.y = terrain.height(pos.x, pos.z) + float(e["height"])
+		var fl = floor_y(pos.x, pos.z, pos.y)
+		pos.y = (fl if not is_nan(fl) else terrain.height(pos.x, pos.z)) + float(e["height"])
 	var id = int(_ids["next"])
 	_ids["next"] = id + 1
 	var o = {"id": id, "tid": int(e["id"]), "npc": false, "mine": true, "res": ri, "gen": ei, "home": pos, "pos": pos,
@@ -311,8 +316,8 @@ func tick(now: float, dt: float, near: Array) -> void:
 		var o = objects[id]
 		if o["to"] != null:
 			_step(o, dt)
-		elif o["wander"] and not o.get("fight", false) and now >= o["next_wander"]:
-			_start_wander(o, now)
+		elif o["wander"] and not o.get("fight", false) and now >= o["next_wander"] and int(o.get("seal", {}).get("root", 0)) == 0:
+			_start_wander(o, now) # gewurzelt / betäubt (Siegel root, buffs.gd) wandert nicht
 
 func _start_wander(o: Dictionary, now: float) -> void:
 	o["next_wander"] = now + _rng.randf_range(WANDER_MIN, WANDER_MAX)
@@ -326,12 +331,27 @@ func _start_wander(o: Dictionary, now: float) -> void:
 		to.z = o["pos"].z + flat.y
 	if flat.length() < 0.5:
 		return
-	to.y = terrain.height(to.x, to.z) + (home.y - terrain.height(home.x, home.z))
+	to.y = _walk_y(to.x, to.z, o["pos"].y, home)
 	o["to"] = to
 	o["speed"] = o["walk"]
 	o["dir"] = atan2(flat.x, flat.y)
 	o["next_wander"] += flat.length() / o["walk"]
 	moves.append(o["id"])
+
+# Boden der begehbaren Ebene der Wegekarte bei (x, z), die zur Höhe want_y passt (wie path_finding::GetValidPos des gs:
+# Gelände + Höhe der Ebene, die Ebene wie WhichLayer), NAN ohne Wegekarte / ohne begehbare Ebene
+func floor_y(x: float, z: float, want_y: float) -> float:
+	if movemap == null or terrain == null:
+		return NAN
+	var c: Vector2i = movemap.cell_of(x, z)
+	var h = terrain.height(x, z)
+	var layer: int = movemap.which_layer(c, want_y - h)
+	return h + movemap.dh(layer, c.x, c.y) if layer >= 0 else NAN
+
+# Höhe beim Umherlaufen: auf derselben Ebene bleiben (Boden der Wegekarte), sonst wie bisher derselbe Abstand zum Gelände
+func _walk_y(x: float, z: float, cur_y: float, home: Vector3) -> float:
+	var fl = floor_y(x, z, cur_y)
+	return fl if not is_nan(fl) else terrain.height(x, z) + (home.y - terrain.height(home.x, home.z))
 
 func _step(o: Dictionary, dt: float) -> void:
 	var pos: Vector3 = o["pos"]
@@ -346,7 +366,7 @@ func _step(o: Dictionary, dt: float) -> void:
 		flat = flat.normalized() * step
 		pos.x += flat.x
 		pos.z += flat.y
-		pos.y = terrain.height(pos.x, pos.z) + (o["home"].y - terrain.height(o["home"].x, o["home"].z))
+		pos.y = _walk_y(pos.x, pos.z, pos.y, o["home"])
 	o["pos"] = pos
 	var c = _cell(pos)
 	if c != o["cell"]:

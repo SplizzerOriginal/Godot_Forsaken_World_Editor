@@ -6,6 +6,78 @@ an editor plugin that reads the original game data, plus a playable client/serve
 > **No game assets are included.** You need your own copy of the original game client;
 > all data is read from it at import time or at runtime.
 
+## Patch Notes
+
+### 2026-11-16
+
+**Skills**
+- Crowd control: stun, root, silence, disarm and immunities; the client locks input and greys out icons.
+- Every starting skill of every class works (charge, heals, blessings, town portal).
+- Passive skills and toggle skills / auras.
+- Skill learning: class skills are learned automatically up to level 20, after that in the skill window for coins.
+- Race skills are granted through the original hidden quests (from level 10); Prayer and the race blessings
+  use the values from the client texts.
+- Combined animations play their effects and sounds (e.g. the priest's heal).
+
+**Quests**
+- Monster and gathering objectives are links: a click starts auto-pathing to the nearest spawn;
+  finished quests show a "Return to NPC" link.
+- Quest EXP is scaled with the original level factor; quest minimum levels come from the server data.
+- New quest rules: linked quests, buff requirements, "finish another quest n times", required items.
+- Level-up rewards (trial essences), the level-up reward window and usable EXP cocktails.
+- Quest log scrolls.
+
+**Items & currency**
+- Right-click to use or equip items; items can be destroyed (destroy button or drag out of the bag)
+  with the original confirmation dialogs.
+- Gathering points that need a tool take it from the bag automatically (e.g. the torch quest).
+- Item tooltips run the game's own description scripts: original layout, icons, sell value.
+- Soul coins (bound currency) from quests and monsters; skill learning spends them first.
+
+**Character window**
+- Two pages like the original (attributes / mastery and resistance) with the base values per level and active buffs.
+- The 3D preview in the character window was removed (not in the original).
+
+**World & collision**
+- Building and cave collision is read from the building files like the original:
+  no more falling through floors in the dwarf city or the Kindred area.
+- The character climbs steps up to 0.8 m.
+- The server places gathering points and monsters on cave floors instead of the terrain below.
+- Auto-pathing walks around obstacles that the navigation map does not know.
+- Town points per race; portal and revival use the nearest one.
+
+**Tests**
+- New test suites for all race/class combinations, quests, items and collision.
+
+## Future Plans
+
+**Next fixes**
+- Werewolf priest / assassin: disconnect on the first login.
+- Skill items and the werewolf quest chain.
+- Original mouse cursors; the cursor hides and stays in place while turning the camera.
+- Separate quest bag in the inventory.
+- Combat rules: skills need a weapon, no attacking while running, auto-attack on the hotbar.
+- Quest markers (main quests first), class-specific quest rewards, location-bound quest items.
+- HUD: EXP numbers, portraits, comparison tooltip for equipment.
+- UI scaling with the window size; loading screen, login window, class icons in the character editor.
+- Models: monster sizes, player eyes, missing textures, helmets.
+- Effects: distortion layers, lightning size, charge effect, loot sparkle, level-up effect, gathering animations.
+- Name plates hidden behind buildings; water shader in s31.
+- Chat channels and tabs (system, world, whisper).
+- Class resource bars (warrior stances, assassin orbs, marksman and bard bars).
+- Performance: convert all game data to Godot resources up front ("Create Godot Client / Server"),
+  less stutter and memory.
+
+**Skills**
+- Monster skills, more skill effects (shields, cleanses, speed …), talents.
+
+**Later**
+- Day/night cycle by server time (server clock on the minimap tooltip).
+- Terrain generator with paintable roads in the original look; connected maps with dynamic chunk loading.
+- Skill editor: class → race → skill / buff / debuff / blessing, adjust values and texts.
+- Monster inspection item: shows drops and drop chances (quest items included) from up to 50 m.
+- Lighting: one-sided NPC lighting, baked map shadows.
+
 ## PWE-Manager (Godot editor plugin)
 
 - **Reads the original client directly**: opens the game's `.pck` archives through a virtual file system,
@@ -57,13 +129,12 @@ an editor plugin that reads the original game data, plus a playable client/serve
 
 ## Testing
 
-An automated test suite (bots, UI-driven world tests, server restart/reconnect tests and a load test with 25 bots)
-runs headless and with the Vulkan and OpenGL renderers.
+An automated test suite (bots, UI-driven world tests, class, quest, item and collision tests,
+server restart/reconnect tests and a load test with 25 bots) runs headless and with the Vulkan and OpenGL renderers.
 
 ## Status
 
-Work in progress. Next up: crowd-control effects (stun, root, silence), the remaining class skills,
-skill learning, monster skills and talents.
+Work in progress, see *Patch Notes* and *Future Plans* at the top.
 
 ## Screenshots
 

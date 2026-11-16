@@ -19,18 +19,24 @@ extends SceneTree
 # die Nachricht; Systemmenü: "Fenster wechseln" baut das HUD im anderen Skin und zurück.
 # Quests (Schritt 10): Verfolgung zeigt "Zerrüttete Zuflucht" mit "Sprecht mit Lady Vestry", Symbol
 # über Lady Vestry, zweiter Klick öffnet ihr Fenster, Gespräch bis "abschließen" durchklicken,
-# Belohnung (40 EXP, Rüstung) im Chat und im EXP-Balken, Folgequest "Greift zu den Waffen!" bei Lady
+# Belohnung (120 EXP = 40 * Stufenfaktor, Rüstung; Stufe 2) im Chat und im EXP-Balken, Folgequest "Greift zu den Waffen!" bei Lady
 # Vestry annehmen.
 # Autoroute: Klick auf den Quest-Titel der Verfolgung öffnet Win_QuestMinionDes mit Beschreibung und
 # NPC-Link, "-" klappt ein, der grüne Link "Adam" führt die Figur über die Wegfindung um die Plattform
 # zu Adam, dort geht sein Fenster auf, der Link "Lady Vestry" zurück; NPC in einem anderen Gebiet ->
 # Meldung; Klick auf die Minimap startet eine Autoroute (Ziel-Marke), W bricht sie ab.
+# Shylias Markt (Z5): Geschenk-Knopf, Reiter, Tausch gegen Essenz, Cocktail per Rechtsklick trinken (Leiste, EXP im Chat).
+# Gegenstände (Bug-Fahrplan B1): Tooltips wie das Original (LuaItemDesc: Rüstung mit Werten, Essenz mit Preis-Symbol und
+# Zusatztext), Zerstören über Btn_Destroy + Klick (Meldungsfenster, OK -> weg, Chat "%d %s zerstört"), die Essenz ist nicht
+# zerstörbar (Hinweis), ein Rechtsklick auf sie bewirkt nichts.
+# Seelenmünzen (Z4): Inventar-Zeile Lab_BindMoney / Txt_BindMoney0..3 sichtbar (Hinweis aus dem XML), Wert aufgeteilt
+# wie das Gold; Chatmeldung bei kill mit bind.
 # Inventar und Ausrüstung (Schritt 10b): B öffnet das Inventar mit der Rüstung (Symbol, Belegung,
 # Tooltip), Rechtsklick legt sie an (anderes Modell), C zeigt sie und Verteidigung 94; über den Link
 # "Johnny" zu ihm (Teil 7994), die Verfolgung zeigt "Novizen-Langschwert 0/1 (Waffenregal)", der Link
 # führt zum Regal, Klick darauf sammelt (Fortschrittsbalken), das Schwert liegt in der Tasche,
 # Ziehen auf den Waffenplatz legt es an (Waffe außerhalb des Kampfes auf dem Rücken der Figur und im Figurenbild, Angriff
-# 296-316), Rechtsklick legt ab und wieder an, Johnny schließt 5679 ab (Stufe 2).
+# 301-321 auf Stufe 2), Rechtsklick legt ab und wieder an, Johnny schließt 5679 ab (Stufe 3).
 # Kampf (Schritt 9): Johnny gibt 5680, die Verfolgung zählt die Beute; zweiter Klick auf ein Wildschwein
 # läuft hin und greift an (Angriffs-Aktion, schwebende Zahlen, Leben im Ziel-Fenster), W beendet den
 # Angriff, das Wildschwein schlägt zurück, stirbt sichtbar, Chat "6 EXP"; zehn Stück, 5680 bei Lady
@@ -40,6 +46,15 @@ extends SceneTree
 # Assassine trägt zwei Dolche (Gürtel, im Kampf in beiden Händen, der linke wirbelt im Angriff 1);
 # Statuseffekte (F3): Client merkt sich buffs, zeigt Brand-Schaden / Heilung als Zahlen; Anzeige (F4): eigene
 # Effekte in Win_Buff (Symbol, Restzeit, Stapel, Reihen), Brennen im Ziel-Fenster, Tooltips, Flammen-GFX am Monster;
+# Kontrolle (F5): mit gemeldeten Siegeln (seal) bewegt W die Figur nicht, Taste 2 und ein Angriff werden mit Meldung
+# abgewiesen, das Hieb-Symbol ist dunkel; danach wieder frei; Startfertigkeiten (F6): Ansturm (skill_move) lässt die
+# Figur gleiten, das Stadtportal (120) zaubert 9,85 s mit Balken und Schleifen-Aktion und bringt sie zum Stadtpunkt;
+# Passiv / Schalter (F7, Testbefehl debug_skill): eine passive Fertigkeit erscheint im K-Fenster, kommt auf keine Leiste,
+# einsetzen -> Meldung; ein Schalter (2093) bekommt eingeschaltet einen hellen Rahmen, erneut eingesetzt ist er aus;
+# K-Fenster (F8): Reiter Grundlagen / Klasse / Rasse / Beruf / Talent / Seele, Klasse mit allen Klassen-Fertigkeiten (noch
+# nicht gelernte "ab Lv"), Rasse mit dem Stadtportal, Grundlagen mit Symbolen, Talent / Seele nur Hinweis (Stufe zu
+# niedrig); C (Z6): Rdo_Reputation zeigt Win_CharacterDetail an derselben Stelle (Win_Character aus) mit den Grundwerten
+# der Klasse (Meisterschaft / Widerstand je Element wie der Server, Platz 07 PvE = 0), Rdo_Title wieder zurück;
 # Fertigkeiten (F2): Taste 2 ohne Ziel -> Meldung, Hieb auf ein Wildschwein (hinlaufen, Aktion, Zauberbalken,
 # Treffer, Mana, Abklingzeit-Uhr, gleich wieder -> "noch nicht bereit", nach 3 s bereit); Magier-Feuerball
 # an einer gebauten Figur (Aktion nachgebaut, Feuer in der Hand, Feuerball fliegt mit elapsed sofort);
@@ -184,8 +199,16 @@ func _run(game: Node) -> void:
 	var again = ls.world.player.global_position if ls.world != null and ls.world.player != null else Vector3.ZERO
 	_check("wieder an der gelaufenen Stelle", Vector2(again.x - moved.x, again.z - moved.z).length() < 0.5)
 	var h2 = ls.world.hud if ls.world != null else null
-	_check("nach dem Wiedereintritt: Hieb auf Platz 2 unten, kein Fenster 'Neue Fertigkeiten'", h2 != null
-		and h2.skill_at("bar0", 1) == 122 and h2.skill_at("bar0", 0) == 0 and not h2.new_skills_shown())
+	# "Wetzt Eure Knochen" (5680, schon erledigt) lehrt die Menschen-Fertigkeit 1958 (Quest-Belohnung, F8): nur sie ist neu
+	_check("nach dem Wiedereintritt: Hieb auf Platz 2 unten, 'Neue Fertigkeiten' nur mit der Quest-Fertigkeit 1958 (Leiste %s, neu %s)" % [
+		str([h2.skill_at("bar0", 0), h2.skill_at("bar0", 1)]) if h2 != null else "-", str(h2.skill_state["new"]) if h2 != null else "-"],
+		h2 != null and h2.skill_at("bar0", 1) == 122 and h2.skill_at("bar0", 0) == 0 and h2.skill_state["new"] == [1958]
+		and h2.new_skills_shown())
+	if h2 != null and h2.new_skills_shown():
+		h2.dlg(h2.NEW_SKILLS).send("Btn_Close")
+	if ls.world != null and h2 != null:
+		await _prayer(ls.world) # erst hier: vorher würde der Testbefehl Gebet vor der Quest-Belohnung lehren
+		await _market(ls.world)
 	other.close()
 	_end(0 if failures == 0 else 1)
 
@@ -200,8 +223,8 @@ func _skills(w) -> void:
 	await _until(func(): return h.new_skills_shown(), 3.0)
 	var pop = h.dlg(h.NEW_SKILLS)
 	var icons = [0, 1].map(func(i): return h.skill_control("new", i).get_node("Symbol").texture != null)
-	_check("Fenster 'Neue Fertigkeiten' mit Hieb und Überfall (Symbole %s)" % str(icons), h.new_skills_shown()
-		and h.skill_state["new"] == [122, 1581] and icons == [true, true])
+	_check("Fenster 'Neue Fertigkeiten' mit Hieb und Überfall (Segen der Menschen erst ab Stufe 10) (Symbole %s, neu %s)" % [str(icons), str(h.skill_state["new"])],
+		h.new_skills_shown() and h.skill_state["new"] == [122, 1581] and icons == [true, true])
 	h._on_skill_hover("new", 0)
 	_check("Tooltip im Fenster: %s" % h.tooltip_text().get_slice("\n", 0).strip_edges(), h.tooltip_text().contains(sd.skill_name(122)))
 	await _shot("3_new_skills")
@@ -213,10 +236,11 @@ func _skills(w) -> void:
 	_key(KEY_K, false)
 	await _until(func(): return h.window_open(h.SKILLS), 3.0)
 	var d = h.dlg(h.SKILLS)
-	var names = [1, 2, 3].map(func(i): return str(d.get_text("Txt_%02d" % i)).get_slice("\n", 0))
-	_check("K öffnet die Fertigkeiten: %s" % str(names), h.window_open(h.SKILLS) and names == [sd.skill_name(120), sd.skill_name(122),
-		sd.skill_name(1581)] and h.skill_control("skill", 1).get_node("Symbol").texture != null)
-	h._on_skill_hover("skill", 1)
+	var names = [1, 2].map(func(i): return str(d.get_text("Name_%d" % i)))
+	_check("K öffnet die Fertigkeiten, Reiter Klasse: %s" % str(names), h.window_open(h.SKILLS) and h.skill_tab == "class"
+		and names == [Hud_plain(sd.skill_name(122)), Hud_plain(sd.skill_name(1581))]
+		and h.skill_control("skill", 0).get_node("Symbol").texture != null)
+	h._on_skill_hover("skill", 0)
 	var tip = h.tooltip_text()
 	_check("Tooltip mit Beschreibung (%d Zeilen)" % tip.count("\n"), tip.contains(sd.skill_name(122)) and tip.count("\n") >= 4)
 	await _shot("3_skills")
@@ -514,12 +538,12 @@ func _quests(w) -> void:
 	await _until(func(): return h.npc_open(), 40.0)
 	_check("zurück bei Lady Vestry über den Link", h.npc_open() and w.talk_npc == vestry.id)
 	var done = await _talk_through(w, 5701, 0)
-	await _until(func(): return h.chat_lines.any(func(l): return l.contains("40 EXP")), 3.0)
+	await _until(func(): return h.chat_lines.any(func(l): return l.contains("120 EXP")), 3.0)
 	var lines = h.chat_lines.filter(func(l): return l.contains("ffff00"))
-	_check("Quest erfüllt: Meldung, 40 EXP, Gegenstand im Chat (%d Zeilen)" % lines.size(), done and lines.size() >= 3
-		and h.chat_lines.any(func(l): return l.contains("40 EXP")))
-	_check("Werte: 40 / 70 EXP (Balken %.0f %%)" % h.dlg("QuickBar0").item("Pro_Exp").value, w.info.get("exp") == 40
-		and absf(h.dlg("QuickBar0").item("Pro_Exp").value - 100.0 * 40 / 70) < 1.0)
+	_check("Quest erfüllt: Meldung, 120 EXP (40 * Stufenfaktor 3), Gegenstand im Chat (%d Zeilen)" % lines.size(), done and lines.size() >= 3
+		and h.chat_lines.any(func(l): return l.contains("120 EXP")))
+	_check("Werte: Stufe 2, 50 / 140 EXP (Balken %.0f %%)" % h.dlg("QuickBar0").item("Pro_Exp").value, w.info.get("exp") == 50
+		and int(h.stats.get("level", 1)) == 2 and absf(h.dlg("QuickBar0").item("Pro_Exp").value - 100.0 * 50 / 140) < 1.0)
 	await _until(func(): return vestry.quest_icon != null and vestry.quest_icon.visible, 3.0)
 	_check("Lady Vestry bietet die Folgequest an (Symbol)", vestry.quest_icon != null and vestry.quest_icon.visible)
 	# Folgequest annehmen
@@ -537,6 +561,13 @@ func _quests(w) -> void:
 	_check("Q öffnet das Quest-Fenster mit 5679, Beschreibung, nicht aufgebbar (%s)" % str(ql.map(func(e): return e["name"])),
 		h.quest_open() and ql.any(func(e): return e["id"] == 5679 and str(e["description"]).length() > 20)
 		and h.quest_selected != 0 and h.dlg("Quest").item("Btn_Abandon").disabled)
+	var qc = h.dlg("Quest").item("Txt_Content")
+	var qsub = h.dlg("Quest").item("Sub_QuestContent")
+	_check("Q: Beschreibung rollt (Mausrad, Leiste) und endet im Unterdialog (%s, Höhe %.0f von %.0f, Inhalt %d)" % [
+		str(qc.scroll_active) if qc is RichTextLabel else "-", qc.position.y + qc.size.y if qc != null else -1.0,
+		qsub.size.y if qsub != null else -1.0, qc.get_content_height() if qc is RichTextLabel else -1],
+		qc is RichTextLabel and qc.scroll_active and qc.mouse_filter == Control.MOUSE_FILTER_STOP and qsub != null
+		and qc.position.y + qc.size.y <= qsub.size.y + 0.5)
 	await _shot("9_quests")
 	_key(KEY_ESCAPE, true)
 	_key(KEY_ESCAPE, false)
@@ -611,8 +642,23 @@ func _inventory(w) -> void:
 	h._on_slot_hover("bag", apos)
 	var tip: String = h.tooltip_text()
 	var armor_name = Hud_plain(w.item_data.info(ARMOR)["name"])
-	_check("Tooltip: %s" % tip.replace("\n", " | "), tip.contains(armor_name) and tip.contains("34"))
+	_check("Tooltip wie das Original (LuaItemDesc %s): %s" % [w.item_data.desc != null and w.item_data.desc.ready(), tip.replace("\n", " | ")],
+		w.item_data.desc != null and w.item_data.desc.ready() and tip.contains(armor_name) and tip.contains("34")
+		and h._tooltip_text.text.contains("[img"))
+	# Seelenmünzen (Z4): Zeile über den Goldmünzen sichtbar, mit Hinweis aus dem XML; Wert aufgeteilt wie das Gold
+	var bind_before = int(h.stats.get("bind_money", 0))
+	w._on_pushed("stats", {"bind_money": 1234567})
+	var hint_node: Control = inv.item("Img_FrameBindMoney_Back_1")
+	var row = [inv.get_text("Txt_BindMoney0"), inv.get_text("Txt_BindMoney1"), inv.get_text("Txt_BindMoney2"), inv.get_text("Txt_BindMoney3")]
+	_check("Inventar: Seelenmünzen-Zeile '%s' %s, Hinweis '%s'" % [inv.get_text("Lab_BindMoney"), str(row),
+		hint_node.tooltip_text.get_slice("\n", 0) if hint_node != null else "-"], inv.is_shown("Lab_BindMoney") and inv.is_shown("Txt_BindMoney3")
+		and inv.is_shown("Img_FrameBindMoney") and row == ["1", "23", "45", "67"] and inv.get_text("Lab_BindMoney") != ""
+		and hint_node != null and hint_node.tooltip_text.contains(inv.get_text("Lab_BindMoney").substr(0, 4))) # Eng: "Soul Coin(s)"
+	var gain = h.texts()["gain_bind"] % h.money_text(321)
+	w._on_pushed("kill", {"id": 0, "tid": 0, "exp": 0, "bind": 321})
+	_check("Chat: '%s'" % gain, h.chat_lines.any(func(l): return l.contains(gain)) and gain.contains("3"))
 	await _shot("10_inventory")
+	w._on_pushed("stats", {"bind_money": bind_before})
 	h.hide_tooltip()
 	var body_before = _skin(w.player.model, "body")
 	_right_click(slot)
@@ -625,12 +671,11 @@ func _inventory(w) -> void:
 	await _until(func(): return h.window_open(h.CHARACTER), 3.0)
 	var ch = h.dlg(h.CHARACTER)
 	await _frames(5)
-	var pv = h.preview
-	_check("C öffnet das Charakter-Fenster: Rüstung, Verteidigung %s, Mana %s, %s (Figurenbild %s, Bild %s, %s)" % [ch.get_text("Txt_Defense"),
-		ch.get_text("Txt_Mp"), ch.get_text("Txt_Prof1"), h._preview_rect.size, pv.viewport.size if pv != null else "-",
-		pv.model.bounds() if pv != null and pv.model != null else "-"], h.window_open(h.CHARACTER) and ch.item("Equip_03").get_node("Symbol").texture != null
-		and ch.get_text("Txt_Defense") == "94" and ch.get_text("Txt_Mp").ends_with("/561") and ch.get_text("Txt_Damage") == "196-196"
-		and h.preview != null and h.preview.model.root != null)
+	var figure = ch.is_shown("Img_Male") != ch.is_shown("Img_Female")
+	_check("C öffnet das Charakter-Fenster: Rüstung, Verteidigung %s, Mana %s, %s (Figur als Bild wie im Original %s, kein 3D-Bild)" % [
+		ch.get_text("Txt_Defense"), ch.get_text("Txt_Mp"), ch.get_text("Txt_Prof1"), str(figure)], h.window_open(h.CHARACTER)
+		and ch.item("Equip_03").get_node("Symbol").texture != null and ch.get_text("Txt_Defense") == "96" and ch.get_text("Txt_Mp").ends_with("/587")
+		and ch.get_text("Txt_Damage") == "201-201" and figure and not "preview" in h and h.find_child("Figurenbild", true, false) == null)
 	await _shot("11_character")
 	_key(KEY_ESCAPE, true)
 	_key(KEY_ESCAPE, false)
@@ -646,6 +691,9 @@ func _inventory(w) -> void:
 	var text: String = h._trace_label.text
 	var sword_name = Hud_plain(w.item_data.info(SWORD)["name"])
 	_check("Verfolgung: %s 0/1 mit Link zum Waffenregal" % sword_name, text.contains(sword_name + " 0/1") and text.contains("[url=pos:"))
+	var rack_where = await w.session.quest_where("item", SWORD, 8366) # Ziel-Link des Gegenstands (Z3): Sammelpunkt der Quest
+	_check("Verfolgung: %s als Ziel-Link (item:%d:8366), Server kennt den Sammelpunkt (%s)" % [sword_name, SWORD, Proto.text(rack_where["code"])],
+		text.contains("[url=item:%d:8366]" % SWORD) and rack_where["code"] == Proto.Code.OK)
 	var at = text.find("[url=pos:")
 	var meta = text.substr(at + 5, text.find("]", at) - at - 5)
 	h._trace_label.meta_clicked.emit(meta)
@@ -658,6 +706,9 @@ func _inventory(w) -> void:
 			rack = n
 	_check("am Waffenregal angekommen (%.1f m)" % (w.player.global_position.distance_to(rack.global_position) if rack != null else -1.0),
 		rack != null and w.player.global_position.distance_to(rack.global_position) < 8.0 and rack.model != null)
+	var rp: Array = rack_where["data"].get("pos", [0, 0, 0])
+	_check("quest_where nannte dieses Waffenregal (%.1f m daneben)" % (Vector3(rp[0], rp[1], rp[2]).distance_to(rack.global_position) if rack != null else -1.0),
+		rack != null and Vector3(rp[0], rp[1], rp[2]).distance_to(rack.global_position) < 1.0)
 	await _shot("12_rack")
 	w.select_target(rack.id)
 	await _until(func(): return h.progress_shown(), 10.0)
@@ -680,10 +731,10 @@ func _inventory(w) -> void:
 	await _until(func(): return h.inventory["equip"].get(0, 0) == SWORD, 3.0)
 	await _frames(5)
 	var weapon = w.player.model.get_node_or_null("Skeleton3D/Waffe")
-	_check("Schwert angelegt: an der Figur (außerhalb des Kampfes auf dem Rücken: %s) und im Figurenbild, Angriff %s, Leben %s" % [
+	_check("Schwert angelegt: an der Figur (außerhalb des Kampfes auf dem Rücken: %s), Angriff %s, Leben %s" % [
 		weapon.bone_name if weapon != null else "-", ch.get_text("Txt_Damage"), ch.get_text("Txt_Hp")],
 		h.inventory["equip"].get(0, 0) == SWORD and weapon != null and weapon.get_child_count() > 0 and weapon.bone_name == "HH_背_巨剑"
-		and h.preview.model.weapon != null and ch.get_text("Txt_Damage") == "296-316" and ch.get_text("Txt_Hp").ends_with("/1674"))
+		and ch.get_text("Txt_Damage") == "301-321" and ch.get_text("Txt_Hp").ends_with("/1730"))
 	await _shot("14_sword")
 	_right_click(ch.item("Equip_00"))
 	await _until(func(): return bag_pos.call(SWORD) >= 0, 3.0)
@@ -698,8 +749,8 @@ func _inventory(w) -> void:
 	h._trace_label.meta_clicked.emit("npc:%d" % JOHNNY)
 	await _until(func(): return h.npc_open(), 40.0)
 	var done = await _talk_through(w, 7997, 0)
-	await _until(func(): return int(h.stats.get("level", 1)) == 2, 3.0)
-	_check("5679 bei Johnny abgeschlossen: Stufe 2", done and int(h.stats.get("level", 1)) == 2
+	await _until(func(): return int(h.stats.get("level", 1)) == 3, 3.0)
+	_check("5679 bei Johnny abgeschlossen: Stufe 3 (40 * 5 EXP)", done and int(h.stats.get("level", 1)) == 3
 		and w.quest_data.task(5679) != {} and not w.quest_data.is_active(5679))
 
 # Kampf: 5680 (zehn Wildschweine), Treffer, Tod, EXP; Tod und Wiederbeleben bei den Giftjagdhunden
@@ -721,6 +772,21 @@ func _combat(w) -> void:
 	_check("5680 angenommen", await _talk_through(w, 5680, 5680))
 	var loot_name = Hud_plain(w.item_data.info(BOAR_LOOT)["name"])
 	_check("Verfolgung: %s 0/10" % loot_name, h._trace_label.text.contains(loot_name + " 0/10"))
+	# Ziel-Link (Z3): Beute-Ziel -> das Monster, das sie fallen lässt; der Server nennt das nächste lebende Wildschwein
+	var mon_link = "mon:%d:5680" % BOAR
+	var linked = h._trace_label.text.contains("[url=%s]" % mon_link)
+	h._trace_label.meta_clicked.emit(mon_link)
+	await _until(func(): return w.routing(), 5.0)
+	var goal = w.route.get("goal", Vector3.INF)
+	var near_boar = INF
+	for n in w.npcs.values():
+		if n.tid == BOAR and not n.dead and goal is Vector3:
+			near_boar = minf(near_boar, Vector2(n.global_position.x - goal.x, n.global_position.z - goal.z).length())
+	var boar_name = Hud_plain(w.npc_data.display_name(w.npc_data.info(BOAR), 0))
+	_check("Verfolgung: Wildschwein-Link (%s) startet die Autoroute zu '%s' (%s), %.1f m vom nächsten Wildschwein" % [str(linked),
+		str(w.route.get("label", "")), boar_name, near_boar], linked and w.routing() and str(w.route.get("label", "")) == boar_name
+		and near_boar < 12.0)
+	w.cancel_route()
 	var killed = 0
 	var back_checked = false # Gegenangriff geprüft (stirbt das erste am ersten Schlag - Krit -, zählen die übrigen)
 	for k in 10:
@@ -745,12 +811,14 @@ func _combat(w) -> void:
 				hit_fx > 0 and early == 0 and delay >= 250)
 			var act = str(w.player.anim.current_animation)
 			var bar = h.dlg("TargetMonster").item("Prg_HP")
-			# die erste Zahl kann auch der Gegenschlag sein: auf das Leben im Ziel-Fenster warten
-			await _until(func(): return bar == null or bar.value < 100.0 or first_hit.get("miss", false), 2.0)
-			var floats = w.get_children().filter(func(c): return c is Label3D)
-			_check("Treffer: Aktion %s, %d schwebende Zahlen, Leben im Ziel-Fenster %.0f %%%s" % [act, floats.size(), bar.value if bar != null else -1.0,
-				" (verfehlt)" if first_hit.get("miss", false) else ""], my_hits[0] > 0 and not floats.is_empty() and bar != null
-				and (bar.value < 100.0 or first_hit.get("miss", false)) and act.begins_with("普通攻击"))
+			# die erste Zahl kann auch der Gegenschlag sein: auf das Leben im Ziel-Fenster warten (der erste Einschlag baut
+			# sein GFX, unter Vulkan samt Shadern, das kann dauern); eine Zahl lebt nur FLOAT_TIME: mitzählen, solange gewartet wird
+			var seen = [0]
+			await _until(_hit_shown.bind(w, seen, bar, first_hit), 6.0)
+			_check("Treffer: Aktion %s, %d schwebende Zahlen, Leben im Ziel-Fenster %.0f %%%s" % [act, seen[0], bar.value if bar != null else -1.0,
+				" (verfehlt)" if first_hit.get("miss", false) else (" (erster Schlag tödlich)" if _one_shot(first_hit) else "")],
+				my_hits[0] > 0 and seen[0] > 0 and bar != null
+				and (bar.value < 100.0 or first_hit.get("miss", false) or _one_shot(first_hit)) and act.begins_with("普通攻击"))
 			var held = w.player.model.get_node_or_null("Skeleton3D/Waffe")
 			_check("im Kampf: Schwert in der Hand (%s)" % (held.bone_name if held != null else "-"), w.player.fighting and held != null
 				and held.bone_name == "HH_righthandweapon")
@@ -771,14 +839,22 @@ func _combat(w) -> void:
 			break
 		killed += 1
 		if k == 0:
-			await _until(func(): return not is_instance_valid(boar) or boar.dead, 3.0) # nach dem Einschlag
-			_check("Wildschwein stirbt sichtbar, Chat: 6 EXP", is_instance_valid(boar) and boar.dead
+			var boar_ref = weakref(boar) # das Modell kann schon freigegeben sein (Lambda mit freigegebenem Objekt = Fehler)
+			await _until(_gone_or_dead.bind(boar_ref), 3.0) # nach dem Einschlag
+			var dead_boar = boar_ref.get_ref()
+			# erster Schlag tödlich: das Modell kann nach dem Sterben schon freigegeben sein
+			_check("Wildschwein stirbt sichtbar, Chat: 6 EXP%s" % (" (erster Schlag tödlich)" if _one_shot(first_hit) else ""),
+				((dead_boar != null and dead_boar.dead) or (dead_boar == null and _one_shot(first_hit)))
 				and h.chat_lines.any(func(l): return l.contains("6 EXP")))
 			await _shot("16_dead_boar")
 	if not back_checked:
 		_check("die Wildschweine schlagen zurück (%d Treffer; das erste starb am ersten Schlag)" % hits_on_me[0], hits_on_me[0] > 0)
 	await _until(func(): return h._trace_label.text.contains(loot_name + " 10/10"), 3.0)
 	_check("zehn Wildschweine (%d), Verfolgung %s 10/10" % [killed, loot_name], killed == 10 and h._trace_label.text.contains(loot_name + " 10/10"))
+	var vestry_name = Hud_plain(w.npc_data.info(VESTRY)["name"])
+	var back_line = h.texts()["return_to"] % vestry_name
+	_check("Ziel erreicht: '%s' als Link (npc:%d) in der Verfolgung" % [back_line, VESTRY], h.trace_items().any(func(t): return t.has(back_line))
+		and h._trace_label.text.contains("[url=npc:%d]" % VESTRY))
 	w.route_npc(VESTRY)
 	await _until(func(): return h.npc_open(), 60.0)
 	_check("5680 bei Lady Vestry abgeschlossen (Beute eingezogen)", await _talk_through(w, 5680, 0)
@@ -795,8 +871,16 @@ func _combat(w) -> void:
 	for slot in [0, 3]:
 		h.unequip_requested.emit(slot, -1)
 		await _until(func(): return not h.inventory["equip"].has(slot), 3.0)
+	var stuck_at = []
+	var hound_from = w.player.global_position
+	var on_stuck = func(): stuck_at.append(w.player.global_position.snapped(Vector3(0.1, 0.1, 0.1)))
+	w.player.route_stuck.connect(on_stuck)
 	w.route_to(HOUNDS_AT, "Giftjagdhunde")
 	await _until(func(): return not w.routing(), 90.0)
+	w.player.route_stuck.disconnect(on_stuck)
+	var hound_route = "Weg von %s, steckte bei %s, angekommen bei %s, gesperrte Felder %d (Kollision %s)" % [hound_from.snapped(Vector3(0.1, 0.1, 0.1)),
+		str(stuck_at), w.player.global_position.snapped(Vector3(0.1, 0.1, 0.1)), w.blocked_cells, str(w.collision_info)]
+	print("WELT-TEST: Giftjagdhunde: ", hound_route)
 	for i in 3:
 		var hound = _nearest(w, 14578)
 		if hound == null or w.player.dead:
@@ -810,7 +894,7 @@ func _combat(w) -> void:
 		w.select_target(0)
 	await _until(func(): return w.player.dead, 90.0)
 	await _frames(5)
-	_check("ohne Ausrüstung bei den Giftjagdhunden gestorben: Win_Message4, Sterbe-Aktion, keine Steuerung",
+	_check("ohne Ausrüstung bei den Giftjagdhunden gestorben: Win_Message4, Sterbe-Aktion, keine Steuerung (%s)" % hound_route,
 		w.player.dead and h.revive_shown() and not w.player.input_enabled and str(w.player.anim.current_animation).begins_with("死亡"))
 	await _shot("17_dead")
 	var corrections = _corrections
@@ -1009,6 +1093,10 @@ func _skill_cast(w) -> void:
 		w._on_pushed("buffs", {"id": mid, "list": []})
 		_check("leere Liste: Effekte weg", not w.buffs.has(mid))
 		await _buff_display(w, mob)
+		await _seal_display(w, mob)
+		await _start_skills(w)
+		await _passive_switch(w)
+		await _skill_window(w)
 
 # Anzeige der Statuseffekte (F4) mit Meldungen wie vom Server: Mentaler Fokus (64, Stärkung, 2 min) und 3 x
 # Verteidigung reduziert (646, Schwächung, 15 s) an der eigenen Figur, Brennen (583, Sichtbar-Index 8) am gewählten
@@ -1063,6 +1151,416 @@ func _buff_display(w, mob) -> void:
 	_check("leere Listen: Win_Buff und Ziel-Fenster ohne Effekte, GFX weg", not b1.visible and not b10.visible and deb.texture == null
 		and not w._buff_gfx.has(mid) and not is_instance_valid(fire))
 	w.select_target(0)
+
+# Kontrolle (F5) im Client mit einer Meldung seal wie vom Server: betäubt (root, silent, melee, idle)
+func _seal_display(w, mob) -> void:
+	var h = w.hud
+	var p = w.player
+	var all = {"root": true, "silent": true, "melee": true, "idle": true, "diet": false, "disarm": false, "invincible": false}
+	w._on_pushed("seal", all)
+	await _physics(3)
+	var from = p.global_position
+	_key(KEY_W, true)
+	await create_timer(0.5).timeout
+	_key(KEY_W, false)
+	await _physics(3)
+	var moved = Vector2(p.global_position.x - from.x, p.global_position.z - from.z).length()
+	var lines = h.chat_lines.size()
+	_key(KEY_2, true)
+	_key(KEY_2, false)
+	await _until(func(): return h.chat_lines.size() > lines, 2.0)
+	var skill_msg = h.chat_lines[-1] if h.chat_lines.size() > lines else "-"
+	var cool = h.skill_control("bar0", 1).get_node_or_null("Cool")
+	await _frames(2)
+	var dim = cool != null and cool._dim
+	lines = h.chat_lines.size()
+	if is_instance_valid(mob):
+		w.attack_target(mob.id)
+	await _until(func(): return h.chat_lines.size() > lines, 2.0)
+	var attack_msg = h.chat_lines[-1] if h.chat_lines.size() > lines else "-"
+	_check("betäubt: W bewegt nicht (%.2f m), Taste 2 -> '%s', Hieb-Symbol dunkel (%s), Angriff -> '%s'" % [moved, skill_msg, str(dim), attack_msg],
+		p.rooted and moved < 0.05 and skill_msg.contains(Proto.text(Proto.Code.SKILL_SEALED, ls.language)) and dim
+		and attack_msg.contains(Proto.text(Proto.Code.ATTACK_SEALED, ls.language)) and w.attacking == 0)
+	for i in 2:
+		if not h.chat_lines.is_empty() and (h.chat_lines[-1].contains(Proto.text(Proto.Code.SKILL_SEALED, ls.language))
+				or h.chat_lines[-1].contains(Proto.text(Proto.Code.ATTACK_SEALED, ls.language))):
+			h.chat_lines.pop_back() # erwartete Meldungen (die Quests prüfen später: keine Fehlermeldung im Chat)
+	var none = {}
+	for k in all:
+		none[k] = false
+	w._on_pushed("seal", none)
+	await _physics(2)
+	from = p.global_position
+	_key(KEY_W, true)
+	await create_timer(0.4).timeout
+	_key(KEY_W, false)
+	await _physics(3)
+	await _frames(2)
+	moved = Vector2(p.global_position.x - from.x, p.global_position.z - from.z).length()
+	_check("wieder frei: W läuft (%.2f m), Hieb-Symbol hell" % moved, not p.rooted and moved > 0.5 and cool != null and not cool._dim)
+
+# Startfertigkeiten (F6) im Client: Ansturm-Bewegung (Meldung skill_move wie vom Server) und das echte Stadtportal
+func _start_skills(w) -> void:
+	var h = w.hud
+	var p = w.player
+	var me = w.my_id
+	var from = p.global_position
+	var to = from + Vector3(4.0, 0.0, 0.0)
+	w._on_pushed("skill_move", {"id": me, "pos": [to.x, to.y, to.z], "time": 400})
+	await create_timer(0.2).timeout
+	var mid_way = Vector2(p.global_position.x - from.x, p.global_position.z - from.z).length()
+	await create_timer(0.5).timeout
+	var left = Vector2(p.global_position.x - to.x, p.global_position.z - to.z).length()
+	_check("Ansturm (skill_move): die Figur gleitet in 0,4 s 4 m weit (nach 0,2 s %.1f m, am Ende %.2f m daneben)" % [mid_way, left],
+		mid_way > 0.5 and mid_way < 3.9 and left < 0.3)
+	await _physics(5)
+	# kombinierte Aktionen (.ecm CombineActName -> BaseActName): jede eigene Fertigkeit hat ihre Aktion am Modell
+	var acts = []
+	var missing = []
+	for k in w.skill_info:
+		var a = str(w.skill_info[k].get("act", ""))
+		if a != "":
+			acts.append(w._weapon_act(a))
+			if not p.anim.has_animation(acts[-1]):
+				missing.append(acts[-1])
+	_check("Aktionen aller eigenen Fertigkeiten gebaut (%s)" % ", ".join(acts), not acts.is_empty() and missing.is_empty())
+	# Stadtpunkte auf ganze Meter gerundet (Werwolf s31 0,5 m unter dem Gelände): place setzt auf den Boden
+	var ground = p.global_position
+	var snapped = p.on_floor(ground - Vector3(0, 0.5, 0))
+	_check("Aufsetzen: Punkt 0,5 m unter dem Boden -> %.2f m (Boden %.2f m)" % [snapped.y, ground.y], absf(snapped.y - ground.y) < 0.1)
+	# Rückkehrstadt im Stadtportal-Text (GameApi.GetHostTownName, Gebiet am Stadtpunkt aus precinct.clt)
+	var desc = Hud_plain(w.skill_data.bbcode(w.skill_data.desc(120, 1)))
+	var town_name = str(w.skill_data.host_town)
+	_check("Stadtportal-Text nennt die Rückkehrstadt '%s' (Stadtpunkte %s)" % [town_name, str(w.towns)],
+		town_name != "" and desc.contains(town_name) and not desc.contains("nil") and w.towns.has(Vector3(-151.0, 102.0, 42.0)))
+	var name = Hud_plain(w.skill_data.skill_name(120))
+	var n0 = h.chat_lines.size()
+	var corrections = _corrections
+	w.use_skill(120)
+	await _until(func(): return w.casting.has("end"), 3.0)
+	await _frames(3)
+	var bar = str(h.dlg(h.PROGRESS).get_text("Txt_info")) if h.progress_shown() else ""
+	var act = str(p.anim.current_animation)
+	var loop = p.anim.has_animation(act) and p.anim.get_animation(act).loop_mode != Animation.LOOP_NONE
+	var events = p.model.get_meta("action_events", {}).get(act, []).map(func(e): return str(e["files"][0]).get_file())
+	await create_timer(5.0).timeout
+	var fx_mid = w.attack_fx._event_nodes.get(p.get_instance_id(), []).filter(func(n): return is_instance_valid(n)).size()
+	await _until(func(): return w.casting.is_empty(), 13.0)
+	await _physics(5)
+	var fx_after = w.attack_fx._event_nodes.get(p.get_instance_id(), []).filter(func(n): return is_instance_valid(n) and not n.is_queued_for_deletion()).size()
+	var town = Vector3(-151.0, 102.0, 42.0)
+	var dist = Vector2(p.global_position.x - town.x, p.global_position.z - town.z).length()
+	_corrections = corrections # das Portal versetzt per pos_correct (erwartet)
+	_check("Stadtportal: Balken '%s', Aktion %s (Schleife %s), danach am Stadtpunkt (%.1f m)" % [bar, act, str(loop), dist],
+		bar.contains(name) and act.begins_with("回城") and loop and dist < 1.5 and h.chat_lines.size() == n0)
+	_check("Stadtportal-GFX: %s, nach 5 s noch %d laufend, am Ende %d" % [str(events), fx_mid, fx_after],
+		events.has("回城循环.gfx") and fx_mid > 0 and fx_after == 0)
+	await _shot("22_portal")
+
+# Treffer sichtbar: Leben im Ziel-Fenster gesunken (bzw. verfehlt); zählt nebenbei die meisten schwebenden Zahlen
+func _hit_shown(w, seen: Array, bar, first_hit: Dictionary) -> bool:
+	seen[0] = maxi(int(seen[0]), w.get_children().filter(func(c): return c is Label3D).size())
+	return bar == null or bar.value < 100.0 or first_hit.get("miss", false) or _one_shot(first_hit)
+
+# Der erste Schlag hat das Wildschwein gleich getötet (Krit: 426 Leben): kein sinkender Balken, das Modell kann schon weg sein
+static func _one_shot(first_hit: Dictionary) -> bool:
+	return first_hit.has("hp") and int(first_hit["hp"]) <= 0
+
+# K-Fenster mit Reitern (F8) und C-Abschnitt Meisterschaft / Widerstand
+const TAB_X_EXPECTED = [19.0, 92.0, 165.0, 238.0, 311.0, 384.0]
+
+func _skill_window(w) -> void:
+	var h = w.hud
+	var t = h.texts()
+	h.close_window(h.SKILLS)
+	h.skill_tab = "class"
+	h.open_window(h.SKILLS)
+	await _frames(3)
+	var d = h.dlg(h.SKILLS)
+	var radios = ["Rdo_Produce", "Rdo_MainInitiative", "Rdo_Race", "Rdo_SkillScience", "Rdo_Tree", "Rdo_Belief"]
+	var labels = radios.map(func(n): return str(d.get_text(n)))
+	var want = ["basic", "class", "race", "jobs", "talent", "soul"].map(func(k): return str(t["tab_" + k]))
+	var xs = radios.map(func(n): return d.item(n).position.x if d.item(n) != null else -1.0)
+	var ordered = xs == TAB_X_EXPECTED
+	var lists = h.tab_skills("class")
+	var all_class = lists[0] + lists[1]
+	var shown = []
+	var unknown_lv = ""
+	for i in h._view_slots:
+		if d.item("Name_%d" % (i + 1)).visible:
+			shown.append(h.skill_at("skill", i))
+			if not h.skill_state["skills"].has(h.skill_at("skill", i)) and unknown_lv == "":
+				unknown_lv = d.get_text("Lv_%d" % (i + 1))
+	_check("K: Reiter %s an %s, Klasse: %d Fertigkeiten (%d gezeigt), noch nicht gelernt: '%s'" % [str(labels), str(xs),
+		all_class.size(), shown.size(), unknown_lv], labels == want and ordered and d.visible and all_class.size() >= 13
+		and shown.size() == all_class.size() and shown.has(122) and unknown_lv == t["skill_from"] % 10
+		and d.item("Lv_%d" % (shown.find(124) + 1)).get_theme_color("font_color") == h.SKILL_NEED_COLOR) # noch nicht gelernt: rot
+	(d.item("Rdo_Race") as BaseButton).button_pressed = true # der kopierte Reiter schaltet selbst um
+	await _frames(2)
+	var race_ids = h._view_ids.filter(func(x): return int(x) != 0)
+	var lv_bless = d.get_text("Lv_%d" % (h._view_ids.find(2497) + 1)) if h._view_ids.has(2497) else "-"
+	var lv_prayer = d.get_text("Lv_%d" % (h._view_ids.find(1958) + 1)) if h._view_ids.has(1958) else "-"
+	var prayer_known = h.skill_state["skills"].has(1958)
+	_check("Reiter Rasse: %s - Segen der Menschen zuerst ('%s', erst ab Stufe 10), Gebet ('%s'), dann Stadtportal (Z1)" % [str(race_ids), lv_bless, lv_prayer],
+		h.skill_tab == "race" and race_ids.slice(0, 2) == [2497, 1958] and race_ids.has(120) and not race_ids.has(122)
+		and lv_bless == t["skill_quest"] and lv_prayer == (t["skill_lv"] % 1 if prayer_known else t["skill_quest"]))
+	h.select_tab("basic")
+	await _frames(2)
+	var b = h.dlg(h.BASE_SKILLS)
+	var icon = b.item("Cmd_01").get_node_or_null("Symbol") if b != null and b.item("Cmd_01") != null else null
+	_check("Reiter Grundlagen: '%s' mit Symbol %s, Win_Skill aus" % [b.get_text("Txt_01") if b != null else "-", str(icon != null and icon.texture != null)],
+		b != null and b.visible and not d.visible and b.get_text("Txt_01") == t["basic_attack"] and icon != null and icon.texture != null)
+	h.select_tab("talent")
+	await _frames(2)
+	var hint = h.dlg(h.TALENT_HINT)
+	var talent_text = hint.get_text("Lab_Explain") if hint != null else "-"
+	var talent_ok = hint != null and hint.visible and talent_text.contains("20") and h.skill_tab == "basic"
+	hint.send("Btn_Close")
+	h.select_tab("soul")
+	await _frames(2)
+	var soul_text = hint.get_text("Lab_Explain")
+	_check("Talent / Seele unter der Stufe: '%s' / '%s', Reiter bleibt %s" % [talent_text, soul_text, h.skill_tab],
+		talent_ok and hint.visible and soul_text.contains("60") and h.skill_tab == "basic")
+	await _shot("24_skills")
+	h.close_window(h.SKILLS)
+	await _frames(1)
+	var closed = not h.window_open(h.SKILLS) and not hint.visible
+	h.open_window(h.CHARACTER)
+	await _frames(2)
+	var c = h.dlg(h.CHARACTER)
+	var cd = h.dlg(h.CHARACTER_DETAIL)
+	var at = c.position
+	(c.item("Rdo_Reputation") as BaseButton).button_pressed = true
+	await _frames(2)
+	var page = cd != null and cd.visible and not c.visible and cd.position == at and h.window_open(h.CHARACTER) \
+		and (cd.item("Rdo_Reputation") as BaseButton).button_pressed
+	# Grundwerte wie der Server (stats.gd: Klasse, Stufe, mas_res_modify) - Krieger: physisch und Wind > 0, Feuer 0, PvE 0
+	var a: Dictionary = h.stats.get("attr", {})
+	var mas = range(8).map(func(i): return cd.get_text("Txt_Mas%02d" % i) if cd != null else "-")
+	var res = range(8).map(func(i): return cd.get_text("Txt_Res%02d" % i) if cd != null else "-")
+	var want_mas = (a.get("mas", []) as Array).map(func(x): return str(int(x)))
+	var want_res = (a.get("res", []) as Array).map(func(x): return str(int(x)))
+	await _shot("25_character_detail")
+	(cd.item("Rdo_Title") as BaseButton).button_pressed = true
+	await _frames(2)
+	var back = c.visible and not cd.visible and c.position == at
+	_check("C: Rdo_Reputation -> Win_CharacterDetail an derselben Stelle %s, Meisterschaft %s, Widerstand %s (Server %s / %s), zurück %s; K geschlossen %s" % [
+		str(page), str(mas), str(res), str(want_mas), str(want_res), str(back), str(closed)], page and back and closed and mas == want_mas
+		and res == want_res and int(mas[0]) > 0 and int(mas[4]) > 0 and mas[3] == "0" and mas[7] == "0" and res[7] == "0")
+	h.close_window(h.CHARACTER)
+
+# Neu gelernte (Testbefehl) gleich weglegen, wie Ziehen aus "Neue Fertigkeiten": sonst öffnet sich das Fenster
+func _seen(h, ids: Array) -> void:
+	h.skills_seen(ids)
+	h.skills_seen_requested.emit(ids)
+
+# Passive Fertigkeiten und Schalter (F7) im Client; Lernen per Testbefehl (der Testserver erlaubt debug_commands)
+func _passive_switch(w) -> void:
+	var h = w.hud
+	var r = await w.session.debug_skill(131, 2) # Krieger: Stärken (passiv, Leben +2 %)
+	await _until(func(): return w.skill_info.has("131") and h.skill_state["skills"].has(131), 3.0)
+	_seen(h, [131])
+	var listed = h.skill_list().has(131)
+	var drop = h._skill_can_drop(Vector2.ZERO, {"skill": 131, "from": "skill", "idx": 0}, "bar0", 9)
+	var lines = h.chat_lines.size()
+	w.use_skill(131)
+	await _frames(2)
+	var said = h.chat_lines[-1] if h.chat_lines.size() > lines else "-"
+	if h.chat_lines.size() > lines:
+		h.chat_lines.remove_at(h.chat_lines.size() - 1) # gewollte Meldung: zählt nicht für "keine Fehlermeldung im Chat"
+	_check("Passiv 131: im K-Fenster %s, auf eine Leiste %s, einsetzen: %s" % [str(listed), str(drop), said],
+		r["code"] == Proto.Code.OK and w.skill_info["131"].get("passive", false) and listed and not drop
+		and said.contains(Proto.text(Proto.Code.SKILL_PASSIVE, ls.language)))
+	r = await w.session.debug_skill(2093, 1) # Schalter Wirkungstreffer-Zeit (Schütze; Effekte ohne Klassen-Grenze)
+	await _until(func(): return w.skill_info.has("2093") and h.skill_state["skills"].has(2093), 3.0)
+	_seen(h, [2093])
+	h.shortcut_requested.emit(0, 9, 2093)
+	await _until(func(): return h.skill_at("bar0", 9) == 2093, 3.0)
+	var cool = h.skill_control("bar0", 9).get_node_or_null("Cool")
+	w.use_skill(2093)
+	await _until(func(): return h.switched.has(2093), 3.0)
+	await _frames(3)
+	var framed = cool != null and cool._on
+	var buffs_on = w.buffs.get(w.my_id, []).map(func(x): return int(x[0]))
+	await _until(func(): return w.casting.is_empty(), 3.0)
+	w.use_skill(2093) # erneut: aus (auch in der Abklingzeit)
+	await _until(func(): return not h.switched.has(2093), 3.0)
+	await _frames(3)
+	_check("Schalter 2093: an mit Rahmen %s (Effekte %s), erneut eingesetzt aus (Rahmen %s, Abklingzeit %.0f %%)" % [str(framed),
+		str(buffs_on), str(cool._on if cool != null else null), h.cool_fraction(2093) * 100.0],
+		r["code"] == Proto.Code.OK and framed and buffs_on.has(88) and not h.switched.has(2093) and cool != null and not cool._on)
+	h.shortcut_requested.emit(0, 9, 0)
+	await _shot("23_switch")
+
+# Gebet (Z2) im Laufen: kein Zauberbalken, keine Aktion, die Figur läuft weiter; Mana +25 %, Effekt 1113 mit dem GFX
+# light 16 (免疫控制技.gfx: der blaue Kreis an den Füßen)
+func _gone_or_dead(ref: WeakRef) -> bool:
+	var n = ref.get_ref()
+	return n == null or n.dead
+
+func _prayer(w) -> void:
+	var h = w.hud
+	var r = await w.session.debug_skill(1958, 1)
+	await _until(func(): return w.skill_info.has("1958") and h.skill_state["skills"].has(1958), 3.0)
+	_seen(h, [1958])
+	await w.session.debug_state(1102, 0, 1000, [100000]) # Mana leeren
+	await _until(func(): return int(h.stats.get("mp", -1)) == 0, 3.0)
+	await _until(func(): return w.casting.is_empty(), 3.0)
+	var p = w.player
+	# auf einer Autoroute (Wegfindung, ohne Hindernis-Stau) zu einem bekannten NPC laufen, der entfernteste zuerst; kommt
+	# die Figur von hier aus nicht los (Route ohne Fortschritt), das nächste Ziel
+	var goals = []
+	for tid in [VESTRY, ADAM, JOHNNY]:
+		var wh: Array = w.quest_data.npc_pos.get(tid, [])
+		if wh.size() == 2 and int(wh[0]) == int(w.info.get("world", 0)):
+			goals.append([(wh[1] as Vector3).distance_to(p.global_position), wh[1], tid])
+	goals.sort_custom(func(a, b): return a[0] > b[0])
+	var far = 0.0
+	var tries = []
+	for g in goals:
+		w.route_to(g[1], "Gebet-Test")
+		var chat_n = w.hud.chat_lines.size()
+		var follows = await _until_ok(func(): return p.following(), 5.0)
+		var start = p.global_position
+		var moves = await _until_ok(func(): return start.distance_to(p.global_position) > 1.0, 3.0)
+		var keys = [KEY_W, KEY_A, KEY_S, KEY_D, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT].filter(func(k): return Input.is_physical_key_pressed(k))
+		var said = w.hud.chat_lines.slice(chat_n).map(func(l): return Hud_plain(l))
+		tries.append("%d: %.0f m, Weg %s, läuft %s%s" % [g[2], g[0], str(follows), str(moves), "" if moves else
+			" [gewurzelt %s, Tasten %s, tot %s, Zauber %s, Boden %s, bei %s, Chat %s]" % [str(p.rooted), str(keys), str(p.dead),
+			str(w.casting), str(p.is_on_floor()), str(p.global_position.snapped(Vector3.ONE * 0.1)), str(said)]])
+		if moves:
+			far = g[0]
+			break
+		w.cancel_route()
+		await _frames(2)
+	var from = p.global_position
+	w.use_skill(1958)
+	await _frames(3)
+	var bar = h.progress_shown()
+	var act = str(p.anim.current_animation) if p.anim != null else "-"
+	await create_timer(0.6).timeout
+	var moved = Vector2(p.global_position.x - from.x, p.global_position.z - from.z).length()
+	var still_target = w.routing()
+	var mine = w.buffs.get(w.my_id, []).filter(func(x): return int(x[0]) == 1113)
+	var gfx = w._buff_gfx.get(w.my_id, {}).get("nodes", {}).has(16)
+	var mp = int(h.stats.get("mp", 0))
+	var max_mp = int(h.stats.get("max_mp", 1))
+	w.cancel_route()
+	_check("Gebet im Laufen (Autoroute, %.0f m; %s): %s, Zauberbalken %s, Aktion '%s', weitergelaufen %.1f m (Route bleibt %s), Effekt 1113 %s, GFX 16 %s, Mana 0 -> %d / %d" % [
+		far, " / ".join(tries), Proto.text(r["code"]), str(bar), act, moved, str(still_target), str(not mine.is_empty()), str(gfx), mp, max_mp],
+		r["code"] == Proto.Code.OK and not bar and not act.begins_with("祈祷") and moved > 1.0 and still_target and not mine.is_empty() and gfx
+		and mp >= int(max_mp * 0.25))
+	await _shot("24_prayer")
+
+# Z5: Geschenk-Knopf öffnet Shylias Markt auf "Erhalten"; Reiter mit den Texten des Spiels; "Gratis EXP": Orangener Cocktail
+# (12784) annehmbar, Gelber (12785, Stufe 20) gesperrt, Essenz-Anzahl; Knopf tauscht (Cocktail in der Tasche, eine Essenz
+# weniger); Rechtsklick auf den Cocktail: Leiste "Trinken", danach EXP im Chat
+func _market(w) -> void:
+	var h = w.hud
+	var count = func(id: int) -> int:
+		var n = 0
+		for pos in h.inventory["bag"]:
+			if int(h.inventory["bag"][pos][0]) == id:
+				n += int(h.inventory["bag"][pos][1])
+		return n
+	var ess0 = count.call(h.ESSENCE)
+	h.dlg("WinMain3").send("Btn_Gift_Lua")
+	await _frames(3)
+	var d = h.dlg(h.LVUP)
+	var tabs = h.LVUP_TABS.map(func(n): return d.get_text("Rdo_1_%d" % n) if d != null else "")
+	_check("Geschenk-Knopf öffnet Shylias Markt auf 'Erhalten' (Reiter %s, %d Einträge, Essenzen %d)" % [str(tabs),
+		h._lvup_entries.size(), ess0], h.lvup_open() and h.lvup_tab == h.LVUP_OPEN_TAB and tabs.all(func(x): return str(x) != "")
+		and not h._lvup_entries.is_empty() and ess0 >= 1 and h.dlg("WinMain3").is_shown("Btn_Gift_Lua"))
+	d.send("Rdo_1_3")
+	await _frames(2)
+	var ids = h._lvup_entries.map(func(e): return int(e.get("taskid", 0)))
+	var orange = ids.find(12784) + 1
+	var yellow = ids.find(12785) + 1
+	var warn = d.get_text("Warning")
+	_check("Reiter 3 ('%s'): Quests %s, Orangener Cocktail '%s' annehmbar, Gelber gesperrt (Stufe 20), Anzeige '%s'" % [
+		d.get_text("Rdo_1_3"), str(ids), d.get_text("Name_%d" % orange) if orange > 0 else "-", warn], orange > 0 and yellow > 0
+		and d.is_shown("Name_%d" % orange) and (d.item("Btn_%d" % orange) as BaseButton).disabled == false
+		and (d.item("Btn_%d" % yellow) as BaseButton).disabled and warn.ends_with(str(ess0)))
+	await _shot("25_market")
+	d.send("Btn_%d" % orange)
+	await _until(func(): return count.call(9056) == 1, 5.0)
+	_check("Tausch: Cocktail in der Tasche (%d), Essenzen %d -> %d, Anzeige '%s'" % [count.call(9056), ess0, count.call(h.ESSENCE),
+		d.get_text("Warning")], count.call(9056) == 1 and count.call(h.ESSENCE) == ess0 - 1 and d.get_text("Warning").ends_with(str(ess0 - 1)))
+	d.send("Btn_Close")
+	var pos = -1
+	for p in h.inventory["bag"]:
+		if int(h.inventory["bag"][p][0]) == 9056:
+			pos = p
+	var exp_lines = h.chat_lines.size()
+	_right_click(h._slot_control("bag", pos)) # Rechtsklick in der Tasche (echter Weg über hud._on_slot_input)
+	await _until(func(): return h.progress_shown(), 3.0)
+	var desc = str(w.using.get("desc", ""))
+	var bar = h.progress_shown()
+	await _until(func(): return count.call(9056) == 0 and not h.progress_shown(), 6.0)
+	var gained = h.chat_lines.slice(exp_lines).filter(func(l): return l.contains("EXP"))
+	_check("Rechtsklick: Leiste '%s' (%s), danach Cocktail weg, Chat %s" % [desc, str(bar), str(gained.map(func(l): return Hud_plain(l)))],
+		bar and desc != "" and not h.progress_shown() and count.call(9056) == 0 and not gained.is_empty() and not h.lvup_open())
+	await _items(w)
+
+# Gegenstände (B1): Essenz-Tooltip, nicht zerstörbar, Rechtsklick ohne Wirkung; zweiter Cocktail aus dem Markt wird über
+# Btn_Destroy + Klick zerstört (Meldungsfenster mit dem Namen, OK)
+func _items(w) -> void:
+	var h = w.hud
+	var pos_of = func(id: int) -> int:
+		for p in h.inventory["bag"]:
+			if int(h.inventory["bag"][p][0]) == id:
+				return p
+		return -1
+	var epos = pos_of.call(h.ESSENCE)
+	if not h.window_open(h.INVENTORY):
+		h.open_window(h.INVENTORY)
+	h._on_slot_hover("bag", epos)
+	var tip: String = h.tooltip_text()
+	var ess_name = Hud_plain(w.item_data.info(h.ESSENCE)["name"])
+	var ext = Hud_plain(w.item_data.desc.ext_desc(h.ESSENCE)) if w.item_data.desc != null else ""
+	_check("Essenz-Tooltip: Name, Preis mit Münz-Symbol, Zusatztext (%s)" % tip.replace("\n", " | "), epos >= 0 and tip.contains(ess_name)
+		and h._tooltip_text.text.count("[img") >= 2 and ext != "" and tip.contains(ext.replace("\\r", "\r").get_slice("\r", 0).strip_edges())) # Zeilen als "\\r" (item_ext_desc.txt)
+	h.hide_tooltip()
+	var n_ess = int(h.inventory["bag"].get(epos, [0, 0])[1])
+	var lines = h.chat_lines.size()
+	h.ask_destroy(epos) # wie Ziehen in die Welt / auf Btn_Destroy
+	_right_click(h._slot_control("bag", epos))
+	await _frames(10)
+	var said = h.chat_lines.slice(lines).map(func(l): return Hud_plain(l))
+	_check("Essenz nicht zerstörbar: Hinweis %s, kein Fenster, Rechtsklick ohne Wirkung (Anzahl %d)" % [str(said), n_ess],
+		not h.aui.has_message_box() and not h.destroy_open() and said.any(func(l): return l.contains(h.texts()["cant_destroy"]))
+		and int(h.inventory["bag"].get(epos, [0, 0])[1]) == n_ess and h.inventory["bag"].get(epos, [0])[0] == h.ESSENCE)
+	# zweiter Cocktail aus dem Markt, dann zerstören
+	h.open_lvup(3)
+	await _frames(2)
+	var ids = h._lvup_entries.map(func(e): return int(e.get("taskid", 0)))
+	var orange = ids.find(12784) + 1
+	if orange > 0:
+		h.dlg(h.LVUP).send("Btn_%d" % orange)
+	await _until(func(): return pos_of.call(9056) >= 0, 5.0)
+	h.close_lvup()
+	var cpos = pos_of.call(9056)
+	var inv = h.dlg(h.INVENTORY)
+	inv.send("Btn_Destroy")
+	var mode = h.destroy_mode
+	var click = InputEventMouseButton.new()
+	click.button_index = MOUSE_BUTTON_LEFT
+	click.pressed = true
+	h._slot_control("bag", cpos).gui_input.emit(click)
+	await _until(func(): return h.aui.has_message_box(), 3.0)
+	var box = h.aui._top.get_child(h.aui._top.get_child_count() - 1) if h.aui.has_message_box() else null
+	var text = Hud_plain(box.get_text("Txt_Message")) if box != null else ""
+	var cname = Hud_plain(w.item_data.info(9056)["name"])
+	await _shot("26_destroy")
+	lines = h.chat_lines.size()
+	if box != null:
+		box.send("IDOK")
+	await _until(func(): return pos_of.call(9056) < 0, 5.0)
+	await _frames(5)
+	said = h.chat_lines.slice(lines).map(func(l): return Hud_plain(l))
+	_check("Btn_Destroy (Modus %s) + Klick: Frage '%s', OK -> Cocktail weg, Chat %s, Modus aus" % [mode, text, str(said)], cpos >= 0
+		and mode and text.contains(cname) and not h.destroy_mode and pos_of.call(9056) < 0
+		and said.any(func(l): return l.contains(cname)))
 
 # Mana vor der Wirkung (letztes stats davor, auch Regeneration) und direkt danach (stats nach cooldown)
 func _skill_push(what: String, d: Dictionary) -> void:

@@ -22,13 +22,19 @@ extends RefCounted
 # zum Geburtsort, dort volle HP (return_home); aggro_time zählt ab dem letzten Treffer in beide
 # Richtungen (ein Monster, das noch zuschlagen kann, bleibt dran).
 # Tod eines Monsters: npcs.gd kill (Respawn), EXP an den Spieler, der den letzten Treffer gesetzt hat
-# (exp + lvlup.exp * Stufen, nur mit killed_exp), Quests (quests.gd kill). Tod eines Spielers: HP 0,
+# (exp + lvlup.exp * Stufen, nur mit killed_exp), dazu Seelenmünzen (gnpc_imp::DropMoney: gleichverteilt in
+# money + lvlup.money * Stufen +- money_var, gerundet; im Client v297 Seelen- statt Goldmünzen, siehe
+# Inventar-Hinweis; die Drop-Wahrscheinlichkeit SPECIAL_ID_CONFIG monster_drop_prob ist nicht lesbar: immer,
+# der Stufenabstand PARAM_ADJUST_CONFIG adjust_money fehlt noch wie bei der EXP), Quests (quests.gd kill). Tod eines Spielers: HP 0,
 # Angriffe enden, Monster lassen ab; revive bringt ihn mit REVIVE_HP der Höchstwerte zum
-# Wiederbelebungspunkt seiner Welt (town_pos der Startvorlagen, ResurrectNearby), ohne EXP-Verlust.
+# nächsten Wiederbelebungspunkt seiner Welt (town_pos der Startvorlagen, je Rasse eigene; ResurrectNearby), ohne EXP-Verlust.
 # Regeneration jede Sekunde: hp_gen / mp_gen der Klasse (außerhalb des Kampfes [0], im Kampf [2]);
 # im Kampf bis COMBAT_TIME s nach dem letzten Treffer.
+# Kontrolle (F5, Siegel aus buffs.gd): ohne Normalangriff (melee) -> attack ATTACK_SEALED und kein Schlag; Monster:
+# betäubt (idle) tun nichts, gewurzelt (root) verfolgen nicht (schlagen aber in Reichweite zu), melee schlägt nicht;
+# ein unverwundbares Opfer (invincible) nimmt keinen Schaden (hit mit immune).
 # Meldungen: hit {src, dst, dmg, miss, crit, hp, max_hp} an alle in Sicht des Opfers, die / revive
-# {id, pos} (Spieler) an alle in Sicht, kill {id, tid, exp} an den Spieler; Monster-Tod über
+# {id, pos} (Spieler) an alle in Sicht, kill {id, tid, exp, bind} an den Spieler; Monster-Tod über
 # npc_leave {die: true}, Monster-Gänge über npc_move (world.gd).
 # ====================================================
 
@@ -43,6 +49,7 @@ const CHASE_REPATH = 1.0 # m: Ziel weiter gelaufen -> neuer Gang
 const COMBAT_TIME = 10.0
 const REVIVE_HP = 0.1
 const AI_RATE = 0.25 # s zwischen den Entscheidungen der Monster
+const IMMUNE = {"dmg": 0, "miss": false, "crit": false, "immune": true} # Treffer auf ein unverwundbares Opfer
 
 var world # world.gd
 var net
@@ -52,7 +59,7 @@ var quests = null
 var inventory = null
 var casting = null # skill_cast.gd
 var buffs = null # buffs.gd
-var revive_points = {} # Welt -> Vector3 (start_roles.json town_pos)
+var revive_points = {} # Welt -> [Vector3] (start_roles.json town_pos, je Rasse eigene Städte); es gilt der nächste
 var _ai_t = 0.0
 var _regen_t = 0.0
 
@@ -67,8 +74,11 @@ func _init(p_world, p_net, p_log: Callable, p_stats) -> void:
 	for r in (d.get("roles", []) if d is Dictionary else []):
 		var tw = int(r.get("town_world", 0))
 		var tp: Array = r.get("town_pos", [])
-		if tw != 0 and tp.size() == 3 and not revive_points.has(tw):
-			revive_points[tw] = Vector3(tp[0], tp[1], tp[2])
+		if tw != 0 and tp.size() == 3:
+			var pts: Array = revive_points.get(tw, [])
+			if not pts.has(Vector3(tp[0], tp[1], tp[2])):
+				pts.append(Vector3(tp[0], tp[1], tp[2]))
+			revive_points[tw] = pts
 
 
 # ====================================================
@@ -84,7 +94,9 @@ func monster_props(nm, o: Dictionary) -> Dictionary:
 	var n = int(o["level"]) - (int(levels[0]) if not levels.is_empty() else int(o["level"]))
 	var v = func(key: String) -> float: return float(t.get(key, 0)) + float(up.get(key, 0)) * n
 	var lo = v.call("min_dmg")
-	o["prop"] = {"dmg": [lo, maxf(lo, v.call("max_dmg"))], "def": v.call("defense"), "hit": v.call("attack"), "eva": v.call("armor"),
+	var cash = v.call("money") # Seelenmünzen: money + lvlup.money * Stufen, +- money_var
+	var cash_var = float(t.get("money_var", 0.0))
+	o["prop"] = {"money": [maxf(0.0, cash - cash_var), maxf(0.0, cash + cash_var)], "dmg": [lo, maxf(lo, v.call("max_dmg"))], "def": v.call("defense"), "hit": v.call("attack"), "eva": v.call("armor"),
 		"crit": v.call("crit_rate"), "crit_dmg": v.call("crit_damage"), "anti_crit": v.call("anti_crit_rate"),
 		"anti_crit_dmg": v.call("anti_crit_damage"), "level": int(o["level"]), "exp": int(v.call("exp")) if int(t.get("killed_exp", 1)) != 0 else 0,
 		"range": float(t.get("attack_range", 1.0)), "size": float(t.get("size", 1.0)), "run": maxf(0.5, float(t.get("run", 3.0))),
@@ -122,7 +134,8 @@ static func damage(att: Dictionary, vic: Dictionary, pvp: bool = false) -> Dicti
 		crit_factor = maxf(1.0, (float(att.get("crit_dmg", 100)) - float(vic.get("anti_crit_dmg", 0))) / 100.0)
 	var d: Array = att["dmg"]
 	var effect = clampf(1.0 - 0.001 * int(att["level"]) + 0.001 * int(vic["level"]), 0.3, 2.0)
-	var dmg = int((float(d[0]) + randf() * (float(d[1]) - float(d[0])) - float(vic.get("def", 0))) * effect * crit_factor)
+	var dmg = int((float(d[0]) + randf() * (float(d[1]) - float(d[0])) - float(vic.get("def", 0))) * effect * crit_factor
+		* (1.0 - clampf(float(vic.get("absorb", 0.0)), 0.0, 0.95))) # absorbDamage der Effekte
 	return {"dmg": maxi(1, dmg), "miss": false, "crit": is_crit}
 
 
@@ -132,6 +145,8 @@ static func damage(att: Dictionary, vic: Dictionary, pvp: bool = false) -> Dicti
 func attack(peer: int, p: Dictionary, id: int) -> Array:
 	if p.get("dead", false):
 		return [Proto.Code.YOU_ARE_DEAD, {}]
+	if Buffs.sealed(p, "melee"):
+		return [Proto.Code.ATTACK_SEALED, {}]
 	var nm = world.npc_maps.get(p["map"])
 	var o = nm.objects.get(id) if nm != null and p["npc_seen"].has(id) else null
 	if o == null or o["npc"] or o.get("mine", false) or not o["select"] or int(o["hp"]) <= 0:
@@ -146,13 +161,38 @@ func stop(p: Dictionary) -> void:
 	if not a.is_empty():
 		p["attack"] = {"id": 0, "next": a.get("next", 0.0)}
 
+# Stadtpunkte der Welt der Figur [[x, y, z], ...] (world_ready towns: Name der Rückkehrstadt im Client)
+func towns_of(p: Dictionary) -> Array:
+	return revive_points.get(int(p["world"]), []).map(func(q): return [q.x, q.y, q.z])
+
+# Nächster Stadtpunkt der Welt der Figur (Wiederbeleben, Stadtportal); null ohne
+func town_of(p: Dictionary):
+	var best = null
+	for q in revive_points.get(int(p["world"]), []):
+		if best == null or (q as Vector3).distance_to(p["pos"]) < (best as Vector3).distance_to(p["pos"]):
+			best = q
+	return best
+
+# Stadtportal (Wirkung gohome, ReturnToTown): zum nächsten Stadtpunkt der Welt (town_pos der Startvorlagen) -> pos_correct
+func return_to_town(p: Dictionary) -> void:
+	var pos = town_of(p)
+	var peer = _peer_of(p)
+	if pos == null or peer == 0 or p.get("dead", false):
+		return
+	stop(p)
+	p["pos"] = pos
+	p["t"] = Time.get_ticks_msec()
+	net.push(peer, "pos_correct", {"pos": [pos.x, pos.y, pos.z], "dir": p["dir"]})
+	log_line.call("Kampf: %s kehrt in die Stadt zurück (%s)" % [p["name"], world._fmt(pos)])
+
 func revive(peer: int, p: Dictionary) -> Array:
 	if not p.get("dead", false):
 		return [Proto.Code.NOT_DEAD, {}]
 	p["dead"] = false
 	p["hp"] = maxi(1, int(p["max_hp"] * REVIVE_HP + 0.5))
 	p["mp"] = int(p["max_mp"] * REVIVE_HP + 0.5)
-	var pos: Vector3 = revive_points.get(int(p["world"]), p["pos"])
+	var town = town_of(p)
+	var pos: Vector3 = town if town != null else p["pos"]
 	p["pos"] = pos
 	p["t"] = Time.get_ticks_msec()
 	net.push(peer, "pos_correct", {"pos": [pos.x, pos.y, pos.z], "dir": p["dir"]})
@@ -183,7 +223,8 @@ func tick(now: float, dt: float) -> void:
 
 func _player_attack(peer: int, p: Dictionary, now: float) -> void:
 	var a: Dictionary = p.get("attack", {})
-	if a.is_empty() or int(a.get("id", 0)) == 0 or p.get("dead", false) or now < float(a["next"]) or p.has("cast"):
+	if a.is_empty() or int(a.get("id", 0)) == 0 or p.get("dead", false) or now < float(a["next"]) or p.has("cast") \
+			or Buffs.sealed(p, "melee"):
 		return
 	var nm = world.npc_maps.get(p["map"])
 	var o = nm.objects.get(int(a["id"])) if nm != null else null
@@ -194,7 +235,7 @@ func _player_attack(peer: int, p: Dictionary, now: float) -> void:
 	if Vector2(o["pos"].x - p["pos"].x, o["pos"].z - p["pos"].z).length() > player_range(p) + mp["size"] * 0.5 + RANGE_SLACK:
 		return # der Client läuft noch heran
 	a["next"] = now + PLAYER_ATTACK_INTERVAL
-	hit_monster(peer, p, nm, o, damage(player_props(p), Buffs.with_mods(mp, o)), now)
+	hit_monster(peer, p, nm, o, IMMUNE if Buffs.sealed(o, "invincible") else damage(player_props(p), Buffs.with_mods(mp, o)), now)
 
 # Treffer eines Spielers auf ein Monster (Normalangriff, Fertigkeiten skill_cast.gd): Leben, Aggro,
 # Meldung hit (extra: z.B. skill, elapsed), Tod
@@ -207,6 +248,9 @@ func hit_monster(peer: int, p: Dictionary, nm, o: Dictionary, r: Dictionary, now
 		o["fight"] = true
 		o["to"] = null
 	var msg = {"src": p["id"], "dst": o["id"], "dmg": r["dmg"], "miss": r["miss"], "crit": r["crit"], "hp": o["hp"], "max_hp": o["max_hp"]}
+	for k in ["immune", "nodmg"]: # unverwundbar / Fluch ohne Schaden
+		if r.get(k, false):
+			msg[k] = true
 	msg.merge(extra)
 	_to_viewers(p["map"], o["pos"], "hit", msg)
 	if int(o["hp"]) <= 0:
@@ -221,11 +265,18 @@ func _monster_dies(peer: int, p: Dictionary, nm, o: Dictionary, now: float) -> v
 		if int(other.get("attack", {}).get("id", 0)) == int(o["id"]):
 			stop(other)
 	var exp = int(mp["exp"])
-	if exp > 0 and quests != null:
-		quests.add_exp(p, exp)
+	var cash: Array = mp.get("money", [0.0, 0.0])
+	var bind = int(randf_range(cash[0], cash[1]) + 0.5)
+	if quests != null and (exp > 0 or bind > 0):
+		if exp > 0:
+			quests.add_exp(p, exp)
+		if bind > 0:
+			bind = quests.add_money(p, "bind_money", bind)
 		quests.save_stats(p)
 		_push_stats(peer, p)
-	net.push(peer, "kill", {"id": o["id"], "tid": o["tid"], "exp": exp})
+	else:
+		bind = 0
+	net.push(peer, "kill", {"id": o["id"], "tid": o["tid"], "exp": exp, "bind": bind})
 	if quests != null:
 		quests.kill(peer, p, int(o["tid"]))
 
@@ -269,8 +320,13 @@ func _fight(nm, o: Dictionary, now: float) -> void:
 	if lost:
 		_go_home(nm, o, mp)
 		return
+	if Buffs.sealed(o, "idle"):
+		return # betäubt: steht, dreht sich nicht, schlägt nicht
 	var flat = Vector2(p["pos"].x - o["pos"].x, p["pos"].z - o["pos"].z)
 	var reach = mp["range"] + mp["size"] * 0.5 + PLAYER_RADIUS
+	if flat.length() > reach + 0.3 and Buffs.sealed(o, "root"):
+		o["dir"] = atan2(flat.x, flat.y) # gewurzelt: wartet auf das Ziel
+		return
 	if flat.length() > reach + 0.3:
 		var goal = Vector3(p["pos"].x, o["pos"].y, p["pos"].z) - Vector3(flat.normalized().x, 0, flat.normalized().y) * reach * 0.8
 		var last = o.get("chase", null)
@@ -287,16 +343,18 @@ func _fight(nm, o: Dictionary, now: float) -> void:
 		o["to"] = null
 		o["speed"] = 0.0
 	o["dir"] = atan2(flat.x, flat.y)
-	if now < float(o.get("next_attack", 0.0)):
+	if now < float(o.get("next_attack", 0.0)) or Buffs.sealed(o, "melee"):
 		return
 	o["next_attack"] = now + MONSTER_ATTACK_INTERVAL
 	o["last_hit"] = now # Kampf läuft: aggro_time zählt ab dem letzten Schlagabtausch
 	var peer = _peer_of(p)
 	p["fight"] = now
-	var r = damage(Buffs.with_mods(mp, o), player_props(p))
+	var r = IMMUNE if Buffs.sealed(p, "invincible") else damage(Buffs.with_mods(mp, o), player_props(p))
 	p["hp"] = maxi(0, int(p["hp"]) - int(r["dmg"]))
-	_to_viewers(p["map"], p["pos"], "hit", {"src": o["id"], "dst": p["id"], "dmg": r["dmg"], "miss": r["miss"], "crit": r["crit"],
-		"hp": p["hp"], "max_hp": p["max_hp"]})
+	var msg = {"src": o["id"], "dst": p["id"], "dmg": r["dmg"], "miss": r["miss"], "crit": r["crit"], "hp": p["hp"], "max_hp": p["max_hp"]}
+	if r.get("immune", false):
+		msg["immune"] = true
+	_to_viewers(p["map"], p["pos"], "hit", msg)
 	if int(p["hp"]) <= 0:
 		_player_dies(peer, p)
 

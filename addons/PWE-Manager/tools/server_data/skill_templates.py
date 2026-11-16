@@ -1,6 +1,9 @@
 # Fertigkeiten und Statuseffekte aus der Editor-Datenbank (skill.sql.2013_11_7, MySQL-Dump "skilldev"
 # der v260-Server-Quellen) -> Server/skill_templates.json und Server/state_templates.json
 # Aufruf: python3 skill_templates.py <skill.sql.2013_11_7> <Ausgabe-Ordner Server/>
+# Dazu jede Fertigkeit, die eine Quest als Belohnung gibt (award skill in <Ausgabe-Ordner>/quest_templates.json,
+# falls vorhanden), auch aus anderen Rollen - z.B. 1889 "初拥" (Rolle 49 任务) der Kindred-Startkette, deren Effekt
+# 914 die Quest 6967 "Erste Begegnung" voraussetzt.
 # Der Dump enthält die Tabellen, aus denen wskill/gen (Generator.java, SkillStub.java, StateFilter.java)
 # den C++-Code der Skill-Bibliothek erzeugt hat. Werte sind Formeln (Text, siehe game/server/skill_expr.gd),
 # verschachtelte Felder Java-Serialisierung (AttackWay, ProcedureVO, SkillStateParam, StateEffect).
@@ -15,6 +18,17 @@ import sys, os, re, json, struct
 SELF_SLOTS = set(range(5, 9)) | set(range(15, 21))
 # Rollen mit lernbaren Klassenfertigkeiten (Tabelle role: 1-16 Rasse/Klasse) und 48 allgemein (120 Stadtportal)
 ROLES = set(range(1, 17)) | {48}
+
+# Werte laut Spieltext des neueren Clients (v297, SkillDesc der Lua-Beschreibung), wo der Dump von 2013 ältere Zahlen hat
+# (Zwischen-Fahrplan Z6): Fertigkeit -> {Effekt: Wirkungswerte data[]}. Nur wo der Text eine Zahl klar nennt; die übrigen
+# Wirkungen bleiben wie im Dump (Segen der Zwerge / Werwölfe stimmen bzw. sind nicht eindeutig). Der Zusatz mit Gegenstand
+# 2793 (player.bufflevel[2793], Seelen-Gegenstand "Rassenfähigkeit verstärkt") entfällt damit - den gibt es noch nicht.
+CLIENT_TEXT_DATA = {
+	2497: {1237: ['0.03', '25']},              # Segen der Menschen: Leben +3 %, alle Meisterschaften +25 (Dump 1 % / 5)
+	2498: {1238: ['0.01', '25', '25']},        # Segen der Elfen: Mana +1 %, Genauigkeit +25, alle Widerstände +25 (Dump 5 / 5)
+	2499: {1239: ['0.08', '15', '15']},        # Segen der Kindred: Leben +8 % (Dump 1 %); Feuer / Dunkel +15 wie im Dump
+	2501: {1241: ['0.03', '0.01']},            # Segen der Steinmenschen: Verteidigung +3 % (Dump 1 %), 1 % weniger Schaden
+}
 
 ESC = {ord('0'): b'\0', ord('n'): b'\n', ord('r'): b'\r', ord('t'): b'\t', ord('Z'): b'\x1a', ord('b'): b'\b'}
 
@@ -251,6 +265,9 @@ def skill_entry(s, roles):
 		data = [text(d) for d in sp.get('data') or []]
 		while data and not data[-1]:
 			data.pop()
+		override = CLIENT_TEXT_DATA.get(num(s['id']), {}).get(num(sp.get('stateid')))
+		if override is not None:
+			data = list(override)
 		states.append({'slot': i, 'self': i in SELF_SLOTS, 'id': num(sp.get('stateid')), 'data': data,
 			'time': text(sp.get('timeparam')), 'chance': text(sp.get('succeedparam')), 'type': num(sp.get('typeid'))})
 	role = roles.get(num(s['roleid']), {})
@@ -302,13 +319,22 @@ def state_entry(s):
 		'effects': effects}
 
 
+def quest_skills(path):
+	"""IDs der Fertigkeiten, die Quests als Belohnung geben (leer ohne quest_templates.json)."""
+	if not os.path.exists(path):
+		return set()
+	tasks = json.load(open(path, encoding='utf-8')).get('tasks', {})
+	return {int(q['award']['skill'][0]) for q in tasks.values() if q.get('award', {}).get('skill')}
+
+
 def main():
 	src, outdir = sys.argv[1:3]
 	dump = open(src, 'rb').read()
 	roles = {num(r['id']): {'name': text(r['name']), 'race': num(r['race']), 'class': num(r['occupation'])}
 		for r in table(dump, 'role')[1]}
 	_, skill_rows = table(dump, 'skill')
-	skills = [skill_entry(s, roles) for s in skill_rows if num(s['roleid']) in ROLES]
+	awarded = quest_skills(os.path.join(outdir, 'quest_templates.json'))
+	skills = [skill_entry(s, roles) for s in skill_rows if num(s['roleid']) in ROLES or num(s['id']) in awarded]
 	skills.sort(key=lambda e: e['id'])
 	_, state_rows = table(dump, 'state')
 	states = sorted((state_entry(s) for s in state_rows), key=lambda e: e['id'])

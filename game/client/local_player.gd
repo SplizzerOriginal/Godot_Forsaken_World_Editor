@@ -14,9 +14,13 @@ extends CharacterBody3D
 # play_hurt (受伤_通用, nur im Stehen), die (死亡_通用, dann liegen 死亡循环_通用), revive; manual_move
 # meldet Bewegungstasten / Klick auf den Boden (beendet den Normalangriff, bricht das Zaubern ab);
 # play_skill(Aktion) spielt die Aktion einer Fertigkeit einmal (z.B. 法师_火球术).
-# Schwerkraft und Kollision (Terrain und Gebäude, world_screen.gd), die Kamera weicht Wänden aus
+# Schwerkraft und Kollision (Terrain und Gebäude, world_screen.gd), Stufen bis STEP_HEIGHT werden beim Laufen hinauf
+# genommen (CECPlayer fStepHei 0,8 m, CDR FullGroundMove: hoch, vor, auf den Boden dahinter), die Kamera weicht Wänden aus
 # (SpringArm3D). Position = Füße wie im Spiel; Richtung = Drehung der Figur um Y (0 = Blick +Z).
 # Animationen: Stehen, Gehen, Rennen, Springen (Start, Schleife, Landen).
+# Gewurzelt / betäubt (rooted, Siegel root vom Server wie LIES_ROOT): keine Bewegung, kein Sprung; Klickziel und
+# Autoroute enden (route_finished(false)). Ansturm: dash(Ziel, s) gleitet in der Zeit dorthin (Eingaben ruhen).
+# Schleifen-Aktionen einer Fertigkeit (Name mit 循环, z.B. das Stadtportal) laufen bis stop_once.
 # Kampfzustand (wie CECPlayer::SetIsFighting(true, 6000)): mark_fight() bei Angriff und Treffer, bis
 # FIGHT_TIME s nach dem letzten; dann hängen die Waffen in der Hand (angelica_player.gd place_weapons),
 # Stehen / Rennen sind 战斗站立 / 战斗奔跑_<Waffenart>; danach wieder Rücken bzw. Gürtel.
@@ -34,9 +38,12 @@ const MOUSE_TURN = 0.006
 const PITCH_MIN = -1.35
 const PITCH_MAX = 0.6
 const ARRIVE = 0.3
+const SNAP_UP = 1.0 # m: so weit darf ein Punkt des Servers unter dem Boden liegen (Stadtpunkte: ganze Meter)
+const SNAP_DOWN = 50.0 # m: so weit unter dem Punkt wird der Boden gesucht
 const WAYPOINT_REACHED = 0.6 # m: nächster Wegpunkt
 const ROUTE_STUCK_TIME = 1.2 # s
 const ROUTE_STUCK_MOVE = 0.3 # m in dieser Zeit
+const STEP_HEIGHT = 0.8 # m: höchste Stufe, die die Figur beim Laufen nimmt (m_MoveConst.fStepHei)
 const ANIM = {"stand": "站立_通用", "walk": "行走_通用", "run": "奔跑_通用", "jump_start": "跳跃起_通用",
 	"jump_loop": "跳跃循环_通用", "land": "跳跃落地_通用"}
 const FIGHT_ANIM = {"stand": "战斗站立_%s", "run": "战斗奔跑_%s"} # Waffenart
@@ -55,6 +62,7 @@ var cam_yaw: Node3D
 var cam_pitch: Node3D
 var arm: SpringArm3D
 var height = 1.8
+var radius = 0.3 # Kapsel (setup)
 var target = null # Klickziel (Vector3) oder null
 var state = Proto.MOVE_STAND
 var input_enabled = true
@@ -62,6 +70,8 @@ var dead = false
 var suffix = "空手" # Endung der Kampf-Aktionen (Waffenart)
 var fighting = false
 var speed_add = 0.0 # m/s aus Tempo-Effekten (stats speed_add)
+var rooted = false # Siegel root (Meldung seal): stehen bleiben
+var _dash = {} # Ansturm: {from, to, t, time}
 var _fight_until = 0 # ms
 var _once = "" # laufende Einmal-Aktion (Angriff, Treffer)
 var _attack_seq = 1
@@ -85,6 +95,7 @@ func setup(p_model: Node3D, p_height: float) -> void:
 	var capsule = CapsuleShape3D.new()
 	capsule.radius = clampf(height * 0.18, 0.25, 0.5)
 	capsule.height = height
+	radius = capsule.radius
 	var cs = CollisionShape3D.new()
 	cs.shape = capsule
 	cs.position.y = height / 2.0
@@ -124,6 +135,8 @@ func play_attack() -> String:
 func play_skill(act: String) -> float:
 	if anim == null or act == "" or not anim.has_animation(act) or dead:
 		return 0.0
+	if act.contains("循环"):
+		anim.get_animation(act).loop_mode = Animation.LOOP_LINEAR # bis zum Ende des Zauberns (stop_once)
 	anim.play(act, 0.1)
 	_once = act
 	return anim.get_animation(act).length
@@ -235,7 +248,7 @@ func _follow(delta: float) -> void:
 
 # Server setzt die Figur zurück (pos_correct) oder an den Start
 func place(pos: Vector3, dir: float) -> void:
-	global_position = pos
+	global_position = on_floor(pos)
 	velocity = Vector3.ZERO
 	stop_route(false)
 	target = null
@@ -248,11 +261,47 @@ func place(pos: Vector3, dir: float) -> void:
 func direction() -> float:
 	return model.rotation.y if model != null else 0.0
 
+# Boden unter einem Punkt (gesucht ab SNAP_UP darüber), sonst der Punkt: die Stadtpunkte der Startvorlagen sind auf
+# ganze Meter gerundet und liegen teils knapp unter dem Gelände (Werwolf s31: 254 unter 254,5), unter dem nichts mehr
+# ist; ohne das fiele die Figur nach dem Stadtportal / Wiederbeleben durch die Welt
+func on_floor(pos: Vector3) -> Vector3:
+	if not is_inside_tree():
+		return pos
+	var q = PhysicsRayQueryParameters3D.create(pos + Vector3(0, SNAP_UP, 0), pos - Vector3(0, SNAP_DOWN, 0), 1)
+	q.exclude = [get_rid()]
+	q.hit_back_faces = false # nur Flächen, die nach oben zeigen
+	var hit = get_world_3d().direct_space_state.intersect_ray(q)
+	return hit["position"] if not hit.is_empty() else pos
+
+# Ansturm (Meldung skill_move): in secs nach to gleiten
+func dash(to: Vector3, secs: float) -> void:
+	stop_route(false)
+	target = null
+	_dash = {"from": global_position, "to": to, "t": 0.0, "time": maxf(0.05, secs)}
+	var d = to - global_position
+	if model != null and Vector2(d.x, d.z).length() > 0.05:
+		model.rotation.y = atan2(d.x, d.z)
+
 func _physics_process(delta: float) -> void:
+	if not _dash.is_empty():
+		_dash["t"] = float(_dash["t"]) + delta
+		var f = clampf(float(_dash["t"]) / float(_dash["time"]), 0.0, 1.0)
+		global_position = (_dash["from"] as Vector3).lerp(_dash["to"], f)
+		velocity = Vector3.ZERO
+		state = Proto.MOVE_RUN if f < 1.0 else Proto.MOVE_STAND
+		if f >= 1.0:
+			_dash = {}
+			_last_floor = global_position
+		_animate()
+		return
 	var wish = Vector2.ZERO
-	if input_enabled:
+	if input_enabled and not rooted:
 		wish.x = _axis(KEY_D, KEY_RIGHT) - _axis(KEY_A, KEY_LEFT)
 		wish.y = _axis(KEY_S, KEY_DOWN) - _axis(KEY_W, KEY_UP)
+	if rooted:
+		stop_route(false)
+		target = null
+		_jump = false
 	var yaw = cam_yaw.global_rotation.y
 	var forward = Vector3(-sin(yaw), 0, -cos(yaw))
 	var right = Vector3(cos(yaw), 0, -sin(yaw))
@@ -290,7 +339,10 @@ func _physics_process(delta: float) -> void:
 		velocity.y -= GRAVITY * delta
 	_jump = false
 	var was_air = _airborne
+	var was_floor = is_on_floor()
 	move_and_slide()
+	if was_floor and move != Vector3.ZERO and velocity.y <= 0.0:
+		_step_up(Vector3(move.x, 0.0, move.z) * delta)
 	if global_position.y < -500.0: # durch die Welt gefallen
 		place(_last_floor + Vector3(0, 1, 0), direction())
 	var flat = Vector2(velocity.x, velocity.z).length()
@@ -305,6 +357,28 @@ func _physics_process(delta: float) -> void:
 	if fighting and Time.get_ticks_msec() > _fight_until and not dead:
 		set_fighting(false)
 	_animate()
+
+# Stufe hinauf: stößt die Figur beim Laufen an eine Kante, prüfen, ob sie STEP_HEIGHT höher und ein Stück weiter (mindestens
+# der halbe Radius) frei steht und darunter ein begehbarer Boden ist - dann steht sie dort
+func _step_up(motion: Vector3) -> void:
+	if motion.length() < 0.0001 or not is_on_wall():
+		return
+	var ahead = motion.normalized() * maxf(motion.length(), radius * 0.5)
+	var up = Vector3(0, STEP_HEIGHT, 0)
+	var t = global_transform
+	if test_move(t, up):
+		return # Decke
+	var t2 = t.translated(up)
+	if test_move(t2, ahead):
+		return # auch oben eine Wand
+	var t3 = t2.translated(ahead)
+	var col = KinematicCollision3D.new()
+	if not test_move(t3, -up, col):
+		return # dahinter kein Boden in Stufenhöhe (Abgrund: normal weiterlaufen)
+	if col.get_normal().angle_to(Vector3.UP) > floor_max_angle or col.get_travel().length() < 0.02:
+		return # zu steil bzw. keine Stufe
+	global_position = t3.origin + col.get_travel()
+	velocity.y = 0.0
 
 func _animate() -> void:
 	if anim == null or dead:
