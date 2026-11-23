@@ -29,6 +29,9 @@ const DEFAULTS = {
 		"maps": "", # Spawns nur dieser Maps laden (z.B. "s9,s10"), leer = alle
 		"dtls": false,
 		"debug_commands": false, # Testbefehle wie debug_state erlauben (nur Testserver: --debug_commands)
+		# s ohne Antwort, bis der Server eine Verbindung aufgibt (ENet-Zeitlimit, höchstens das Doppelte); ein Client, der
+		# lädt (Map einhängen, mehrere Sekunden), darf nicht fliegen (Bug-Fahrplan B16; ENet-Vorgabe wären nur 5 s)
+		"net_timeout": 30,
 	},
 }
 
@@ -46,9 +49,15 @@ func _init(p_section: String, path: String = FILE) -> void:
 
 func value(key: String) -> Variant:
 	var def = DEFAULTS[section][key]
-	if _args.has(key):
-		return _convert(_args[key], def)
-	return _convert(_cfg.get_value(section, key, def), def)
+	var v = _convert(_args[key], def) if _args.has(key) else _convert(_cfg.get_value(section, key, def), def)
+	return data_dir(v) if key == "data_root" else v
+
+# Exportiertes Spiel (Feature "template", Leiste EXPORT): Ordner mit .gdignore wie res://Stock-PWE-Client stecken nicht in
+# der .pck - dort liegen sie neben dem Programm (bis der Export alles umwandelt, Performance-Fahrplan P2f)
+static func data_dir(path: String) -> String:
+	if OS.has_feature("template") and path.begins_with("res://") and not DirAccess.dir_exists_absolute(path):
+		return OS.get_executable_path().get_base_dir().path_join(path.trim_prefix("res://"))
+	return path
 
 func set_value(key: String, v: Variant) -> void:
 	_cfg.set_value(section, key, v)

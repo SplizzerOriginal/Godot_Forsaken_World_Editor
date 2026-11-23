@@ -392,12 +392,14 @@ func filter_words(text: String) -> String:
 			at = lower.find(w, at + 1)
 	return out.substr(1, out.length() - 2)
 
-# Nächster Ort eines Quest-Ziels (Z3, Anfrage quest_where): "mon" = lebende Figur der Monster-Vorlage id, "item" = Sammelpunkt,
-# der für die Quest quest sammelt (task_in / task_out) oder den Gegenstand id ergibt. Erst die Map des Spielers, sonst die
-# erste andere (world -1: anderes Gebiet) -> {map, world, pos: [x, y, z]} oder {}
+# Nächster Ort eines Quest-Ziels (Z3, Anfrage quest_where): "mon" = lebende Figur der Monster-Vorlage id, "npc" = NPC der
+# Vorlage id (seine Lage kennt nur der Server: die task_npc.data des neueren Clients hat z.B. die Werwolf-NPCs schon in s43,
+# die Spawn-Daten des Servers in s31), "item" = Sammelpunkt, der für die Quest quest sammelt (task_in / task_out) oder den
+# Gegenstand id ergibt. Erst die Map des Spielers, sonst die erste andere (world -1: anderes Gebiet) -> {map, world,
+# pos: [x, y, z]} oder {}
 func where_target(p: Dictionary, kind: String, id: int, quest: int) -> Dictionary:
 	var want = {}
-	if kind == "mon":
+	if kind == "mon" or kind == "npc":
 		want[id] = true
 	elif inventory != null:
 		for mid in inventory.mines:
@@ -418,7 +420,8 @@ func where_target(p: Dictionary, kind: String, id: int, quest: int) -> Dictionar
 		var best = null
 		var best_d = INF
 		for o in nm.objects.values():
-			if not want.has(int(o["tid"])) or bool(o.get("mine", false)) != (kind == "item") or int(o.get("hp", 1)) <= 0:
+			if not want.has(int(o["tid"])) or bool(o.get("mine", false)) != (kind == "item") \
+					or (kind == "npc" and not o.get("npc", false)) or int(o.get("hp", 1)) <= 0:
 				continue
 			var d = (o["pos"] as Vector3).distance_squared_to(p["pos"])
 			if d < best_d:

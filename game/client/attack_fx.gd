@@ -37,6 +37,7 @@ const DEFAULT_HEIGHT = 1.8
 const MOVE_PARABOLIC = 1
 const ON_TARGET = [7, 13] # Treffer am Ziel, kein Flug
 const MAX_EVENT_LIFE = 10.0 # s: GFX eines Aktions-Ereignisses höchstens
+const WorldTrail = preload("res://addons/PWE-Manager/GFX/gfx_world_trail.gd") # ungebundene Partikel bleiben in der Welt (B10)
 
 var importer = null # ecm_importer.gd (runtime)
 var _att_script: Script = null
@@ -47,6 +48,9 @@ var _flying: Array = [] # {node, att, attacker, target, key, impact, from, t, mo
 var _pending = {} # Instanz-ID des Ziels -> Anzahl ausstehender Wirkungen
 var _after = {} # Instanz-ID des Ziels -> [Callable] nach dem letzten Einschlag
 var built = 0 # gebaute GFX (Test)
+var late_loads: Array = [] # GFX / Klänge, die erst beim Abspielen geladen wurden: [Datei, ms] (Test, Performance-Fahrplan P3)
+var _snd = {} # Klang (sfx\) -> AudioStream oder null
+var _prewarming = false
 var _event_nodes = {} # Instanz-ID der Figur -> [Node] der laufenden Aktions-Ereignisse (stop_events)
 var _event_gen = {} # Instanz-ID der Figur -> Zähler: stop_events verwirft noch ausstehende Ereignisse
 
@@ -72,13 +76,44 @@ func points_of(model: Node, action: String) -> Array:
 		_points[ecm] = importer.attack_points(importer.read_ecm(ecm))
 	return _points[ecm].get(action, [])
 
-# GFX der Angriffe eines Modells vorab bauen
-func prewarm(model: Node, actions: Array) -> void:
+# GFX und Klänge der Aktionen eines Modells vorab laden (P3: sonst ruckelt der erste Angriff / das erste Zaubern):
+# Flug-, Boden- und Treffer-GFX der Angriffspunkte (.att) und die GFX- / Klang-Ereignisse der Aktionen (z.B. das Feuer in der
+# Hand beim Zaubern) -> Anzahl neu geladen
+func prewarm(model: Node, actions: Array) -> int:
+	_prewarming = true
+	var n = _gfx.size() + _snd.size()
+	var events: Dictionary = model.get_meta("action_events", {}) if model != null else {}
 	for a in actions:
 		for p in points_of(model, a):
-			var att = _att_of(p[1])
-			for g in [att.get("fly", {}).get("gfx", ""), att.get("hit", {}).get("gfx", "")]:
+			for g in importer.att_gfx(_att_of(p[1])) if importer != null else []:
 				_scene(g)
+		for e in events.get(a, []):
+			if e["files"].is_empty():
+				continue
+			if int(e["type"]) == 101:
+				_sound(str(e["files"][0]))
+			else:
+				_scene(str(e["files"][0]))
+	_prewarming = false
+	return _gfx.size() + _snd.size() - n
+
+# Klänge vorab laden (z.B. der Stufenaufstieg) -> Anzahl neu geladen
+func prewarm_sounds(paths: Array) -> int:
+	_prewarming = true
+	var n = _snd.size()
+	for p in paths:
+		_sound(str(p))
+	_prewarming = false
+	return _snd.size() - n
+
+# Einzelne GFX vorab laden (z.B. die Statuseffekte der eigenen Klasse) -> Anzahl neu geladen
+func prewarm_gfx(paths: Array) -> int:
+	_prewarming = true
+	var n = _gfx.size()
+	for p in paths:
+		_scene(str(p))
+	_prewarming = false
+	return _gfx.size() - n
 
 # Angriff: Aktion action des Modells von attacker auf target; impact kommt mit dem ersten Einschlag.
 # elapsed ms: die Aktion läuft schon so lange (Fertigkeit: Treffer kommt nach dem Zaubern)
@@ -141,7 +176,7 @@ func _event(e: Dictionary, fig, model, left: float, gen: int = -1) -> void:
 		return # inzwischen abgebrochen
 	var file = str(e["files"][0])
 	if int(e["type"]) == 101:
-		var stream = importer.source_sound(file)
+		var stream = _sound(file)
 		if stream == null:
 			return
 		var sp = AudioStreamPlayer3D.new()
@@ -170,6 +205,7 @@ func _event(e: Dictionary, fig, model, left: float, gen: int = -1) -> void:
 		sk.add_child(ba)
 		ba.add_child(node)
 		node.position = _vec(str(e.get("HookOffset", "")))
+		WorldTrail.enable(node) # bewegt sich mit der Figur: ungebundene Partikel bleiben zurück
 		get_tree().create_timer(life).timeout.connect(ba.queue_free)
 		_track(fig, ba)
 		return
@@ -182,7 +218,8 @@ func _event(e: Dictionary, fig, model, left: float, gen: int = -1) -> void:
 
 # Dauer-GFX eines Statuseffekts (CECModel::PlayGfx am Haken, ohne Haken CECPlayer::_PlayBindGfx an der Figur):
 # bleibt, bis der Aufrufer den zurückgegebenen Node freigibt (das GFX wiederholt sich selbst). Fehlt dem Modell
-# der Haken, sitzt es in halber Höhe der Figur
+# der Haken, sitzt es in halber Höhe der Figur. Ungebundene Partikel (IsBind 0) bekommen die Lage-Geschichte
+# (gfx_world_trail.gd): sie bleiben beim Laufen zurück wie im Original
 func attach(fig: Node3D, model: Node, gfx_path: String, hook: String) -> Node3D:
 	var scene = _scene(gfx_path)
 	if scene == null or not is_instance_valid(fig):
@@ -195,11 +232,13 @@ func attach(fig: Node3D, model: Node, gfx_path: String, hook: String) -> Node3D:
 		ba.bone_name = sk.get_bone_name(bone)
 		sk.add_child(ba)
 		ba.add_child(node)
+		WorldTrail.enable(node) # z.B. Staubspur beim Überfall (加速.gfx): ungebundene Partikel bleiben in der Welt zurück
 		return ba
 	var parent: Node3D = model if is_instance_valid(model) and model is Node3D else fig
 	parent.add_child(node)
 	if hook != "":
 		node.global_position = fig.global_position + Vector3.UP * _height(fig) * 0.5
+	WorldTrail.enable(node)
 	return node
 
 # Knochen eines Hakens (Groß- / Kleinschreibung egal), -1 = fehlt
@@ -340,17 +379,30 @@ func _impact(key: int, impact: Callable) -> void:
 # ====================================================
 func _att_of(path: String) -> Dictionary:
 	if not _att.has(path):
-		var src = importer.find_game_file("gfx/SkillAttack/" + path) if importer != null else ""
-		_att[path] = _att_script.read(importer.files, src) if src != "" else {}
+		# eingelesen und umgewandelt (Leiste EXPORT: <att>_att.bin), sonst aus den Spieldaten (ecm_importer.gd att_of)
+		_att[path] = importer.att_of(path) if importer != null else {}
 	return _att[path]
 
 func _scene(gfx_path: String) -> PackedScene:
 	if gfx_path == "" or importer == null:
 		return null
 	if not _gfx.has(gfx_path):
+		var t0 = Time.get_ticks_usec()
 		_gfx[gfx_path] = importer.gfx_scene(gfx_path)
 		built += 1
+		if not _prewarming:
+			late_loads.append([gfx_path, (Time.get_ticks_usec() - t0) / 1000.0])
 	return _gfx[gfx_path]
+
+func _sound(path: String) -> AudioStream:
+	if path == "" or importer == null:
+		return null
+	if not _snd.has(path):
+		var t0 = Time.get_ticks_usec()
+		_snd[path] = importer.source_sound(path)
+		if not _prewarming:
+			late_loads.append([path, (Time.get_ticks_usec() - t0) / 1000.0])
+	return _snd[path]
 
 # Ort an einer Figur wie A3DSkillGfxMan GetPositionById: Haken des Modells, sonst Mitte bzw. Füße
 func _pos_of(fig, model, pos: Dictionary) -> Vector3:

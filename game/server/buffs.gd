@@ -69,7 +69,10 @@ const TO_PERCENT = ["crit", "crit_dmg", "anti_crit", "anti_crit_dmg"] # Bruchtei
 const PERMILLE = ["dmg%", "def%", "hit%", "eva%", "max_hp%", "max_mp%", "hp_gen%", "mp_gen%", "heal%"] # Wert * 1000
 const PERIODIC = ["decHp2Death", "decHp", "persistHeal", "incMp", "decMp"]
 const INSTANT = ["heal", "subHp", "subHpNotDeath", "addMp", "subMp", # dazu die Kontrolle (F5):
-	"break", "repel", "taunt", "assault", "dispel", "dispelOnce", "clearFilter", "gohome"]
+	"break", "repel", "taunt", "assault", "dispel", "dispelOnce", "clearFilter", "gohome",
+	"genMob"] # Monster erzeugen (B22): Werte von der Fertigkeit (extra mob, skill_templates.json aus der Tabelle skillmob)
+const MOB_MAX = 10 # GenMob::TakeEffect: höchstens 10 Monster
+const MOB_NEAR = 2.0 # m: pos_type 0 (CreateMinors ohne Ort) zufällig so weit um den Träger
 const SEALS = {"stun": ["idle", "root", "silent", "melee"], "stop": ["root"], "silent": ["silent"], "melee": ["melee"],
 	"diet": ["diet"], "disArm": ["disarm"], "invincible": ["invincible"]}
 const SEAL_KEYS = ["root", "silent", "melee", "idle", "diet", "disarm", "invincible"]
@@ -174,6 +177,7 @@ func apply(obj: Dictionary, map_name: String, state_id: int, values: Array, time
 		if str(st["begin"][0]) != "1":
 			return false
 		var b = {"id": state_id, "src": src_id, "effects": effects, "map": map_name}
+		b.merge(extra) # z.B. mob (genMob)
 		for e in effects:
 			if e["name"] in INSTANT:
 				_instant(obj, b, e)
@@ -466,6 +470,8 @@ func _periodic(obj: Dictionary, b: Dictionary, e: Dictionary) -> void:
 func _instant(obj: Dictionary, b: Dictionary, e: Dictionary) -> void:
 	var v = float(e["value"])
 	match str(e["name"]):
+		"genMob":
+			_gen_mob(obj, b)
 		"heal":
 			_heal(obj, b, int(v * (1.0 + float(mods_of(obj).get("heal%", 0)) / 1000.0)))
 		"subHp":
@@ -497,6 +503,32 @@ func _instant(obj: Dictionary, b: Dictionary, e: Dictionary) -> void:
 # WIRKEN
 # ====================================================
 # Schaden aus einem Effekt (BeHurt): Meldung hit mit buff, Aggro, Tod mit Belohnung für den Zaubernden
+# genMob (GenMob::TakeEffect): mob {id, num, time s, pos, pos_type} der Fertigkeit; Lage 0 neben dem Träger, 1 an pos,
+# 2 Träger - pos (z.B. 4575 "Segen der Erde (Säen)": ein Setzling an der Figur, 600 s); auf der Map des Effekts
+func _gen_mob(obj: Dictionary, b: Dictionary) -> void:
+	var mob: Dictionary = b.get("mob", {})
+	var nm = world.npc_maps.get(str(b.get("map", ""))) if world != null and not mob.is_empty() else null
+	if nm == null:
+		return
+	var at: Vector3 = obj.get("pos", Vector3.ZERO)
+	var off = Vector3(float(mob["pos"][0]), float(mob["pos"][1]), float(mob["pos"][2])) if mob.get("pos", []).size() == 3 else Vector3.ZERO
+	var made = []
+	for i in mini(int(mob.get("num", 0)), MOB_MAX):
+		var pos = at
+		match int(mob.get("pos_type", 0)):
+			0:
+				var a = randf() * TAU
+				pos += Vector3(cos(a), 0.0, sin(a)) * randf() * MOB_NEAR
+			1:
+				pos = off
+			2:
+				pos = at - off
+		var id = nm.spawn_minor(int(mob["id"]), pos, float(mob.get("time", 0)), Time.get_ticks_msec() / 1000.0) # Uhr von npcs.tick
+		if id != 0:
+			made.append(id)
+	log_line.call("Statuseffekte: %s erzeugt %d x Monster %d für %d s (%s)" % [str(obj.get("name", obj.get("id", ""))), made.size(),
+		int(mob["id"]), int(mob.get("time", 0)), str(b.get("map", ""))])
+
 func _hurt(obj: Dictionary, b: Dictionary, amount: int, can_kill: bool) -> void:
 	if sealed(obj, "invincible"):
 		return

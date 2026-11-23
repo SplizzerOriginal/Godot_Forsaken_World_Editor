@@ -72,6 +72,10 @@ func info(tid: int) -> Dictionary:
 		out["dist"] = float(r.get("max_distance", 3.0))
 		out["desc"] = _clean(r.get("progress_desc", ""))
 		out["task"] = int(r.get("task_in", 0))
+		# Sammel-Aktion (B10, CECHPWorkGather -> PlayVocationAction): vocation_action_type 1 Bergbau, 2 Pflücken ... und action
+		# (GBK, z.B. 采矿循环 / 开锁循环 / 祈福循环) = Name der Schleife
+		out["act_type"] = int(r.get("vocation_action_type", 0))
+		out["action"] = _gbk_field(r.get("action", ""))
 		var rel = elements.path_of(int(r.get("file_matter", 0)))
 		out["ecm"] = importer().find_game_file(rel) if rel != "" else ""
 	elif r.is_empty():
@@ -80,7 +84,7 @@ func info(tid: int) -> Dictionary:
 	if out["scene"] == "" and not r.is_empty():
 		if not out.has("ecm"):
 			out["ecm"] = _ecm_path(tid)
-		out["scene"] = importer().out_path(out["ecm"], ".tscn") if out["ecm"] != "" else ""
+		out["scene"] = importer().scene_of(out["ecm"]) if out["ecm"] != "" else "" # binär (.scn), sonst ältere .tscn
 	_cache[tid] = out
 	return out
 
@@ -126,6 +130,21 @@ func name_color(i: Dictionary, level: int) -> Color:
 func _ecm_path(tid: int) -> String:
 	var rel: String = elements.model_of(tid) if elements != null else ""
 	return importer().find_game_file(rel) if rel != "" else ""
+
+# char[]-Feld der elements.data (Liste vorzeichenbehafteter Bytes, GBK) -> Text
+func _gbk_field(v) -> String:
+	if v is String:
+		return v
+	if not v is Array:
+		return ""
+	var b = PackedByteArray()
+	for x in v:
+		if int(x) == 0:
+			break
+		b.append(int(x) & 0xFF)
+	if b.is_empty():
+		return ""
+	return importer().files.decode_gbk(b) if importer() != null and importer().files != null else b.get_string_from_ascii()
 
 static func _clean(s) -> String:
 	var t = str(s)

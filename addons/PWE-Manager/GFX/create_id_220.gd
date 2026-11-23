@@ -229,8 +229,7 @@ func _build_multimesh(node: Node) -> MultiMesh:
 
 func _build_material(parsed_data: Dictionary, z_test: bool) -> ShaderMaterial:
 	var mat = ShaderMaterial.new()
-	var shader = Shader.new()
-	shader.code = preload("gfx_parser.gd").add_gfx_alpha(_build_shader_code(parsed_data, z_test))
+	var shader = preload("gfx_parser.gd").shared_shader(preload("gfx_parser.gd").add_gfx_alpha(_build_shader_code(parsed_data, z_test)))
 	mat.shader = shader
 	var tex_path_raw = str(parsed_data.get("TexFile", "")).strip_edges()
 	if tex_path_raw != "":

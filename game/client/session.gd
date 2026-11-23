@@ -198,6 +198,10 @@ func item_use(pos: int) -> Dictionary:
 func item_destroy(pos: int, id: int) -> Dictionary:
 	return await net.request("item_destroy", {"pos": pos, "id": id})
 
+# Test: Gegenstand in die Tasche (nur Testserver mit debug_commands) -> {pos}
+func debug_item(id: int, count: int = 1) -> Dictionary:
+	return await net.request("debug_item", {"id": id, "count": count})
+
 func debug_char(level: int, money: int, bind_money: int = -1) -> Dictionary:
 	var args = {"level": level, "money": money}
 	if bind_money >= 0:
@@ -238,6 +242,11 @@ func _tls_options() -> TLSOptions:
 # ENET-SIGNALE
 # ====================================================
 func _on_connected() -> void:
+	# Zeitlimit zum Server statt der ENet-Vorgabe 5 s: beim Laden einer Map antwortet der Client mehrere Sekunden nicht
+	# (B16); der Server bekommt dieselbe Geduld (Einstellung net_timeout)
+	var mp = multiplayer.multiplayer_peer
+	if mp is ENetMultiplayerPeer and mp.get_peer(1) != null:
+		mp.get_peer(1).set_timeout(Proto.NET_TIMEOUT_LIMIT, Proto.NET_TIMEOUT_MS, Proto.NET_TIMEOUT_MS * 2)
 	if _wait != null:
 		_connect_done(_wait, Proto.Code.OK)
 
@@ -253,6 +262,7 @@ func _on_pushed(what: String, data: Dictionary) -> void:
 	match what:
 		"kicked":
 			last_kick = int(data.get("code", Proto.Code.DISCONNECTED))
+			print("Client: vom Server getrennt: %s (Code %d)" % [Proto.text(last_kick), last_kick])
 			kicked.emit(last_kick)
 		"server_closing":
 			last_kick = Proto.Code.SERVER_CLOSING
@@ -271,7 +281,10 @@ func _drop(code: int) -> void:
 	if p is ENetMultiplayerPeer:
 		p.close()
 	multiplayer.multiplayer_peer = OfflineMultiplayerPeer.new()
-	net.fail_all(Proto.Code.DISCONNECTED)
+	# Grund ins Log (Fehlersuche, z.B. Bug-Fahrplan B16); offene Anfragen (etwa world_ready im Ladebildschirm) scheitern
+	# mit dem Grund des Servers statt nur "getrennt"
+	print("Client: Verbindung beendet: %s (Code %d)" % [Proto.text(code), code])
+	net.fail_all(code if code != Proto.Code.OK else Proto.Code.DISCONNECTED)
 	account = ""
 	_set_state(State.OFFLINE)
 	disconnected.emit(code)

@@ -57,10 +57,13 @@ var _scale = 1.0
 
 
 # Gibt es Dialoge der Sprache unter dem Datenordner (entpackt oder in den .pck)?
+# (über das VFS: im exportierten Spiel ohne Original-Daten antwortet das Pfadverzeichnis, Performance-Fahrplan P2f6)
 static func data_available(data_root: String, lang: String) -> bool:
-	if not DirAccess.dir_exists_absolute(data_root) or not ResourceLoader.exists(FILES):
+	if not ResourceLoader.exists(FILES):
 		return false
 	var files = load(FILES).new(data_root)
+	if not files.dir_exists(data_root):
+		return false
 	for base in [lang, "resources/" + lang]:
 		if files.resolve(base + "/interfaces") != "":
 			return true
@@ -125,6 +128,12 @@ func load_layout(layout_name: String) -> int:
 	for e in ui.read_layout(layout_name):
 		_layout[e["file"].to_lower()] = Vector2i(e["x"], e["y"])
 	strings = ui.read_string_table(layout_name)
+	# Die Tabellen der Skins (1gameui.stf / 2gameui.stf) sind nicht übersetzt (Skin 2 Chinesisch, Skin 1 Englisch), die
+	# Sprache steht in der Tabelle ohne Skin-Ziffer (gameui.stf, z.B. 236 "Wollt Ihr den ausgewählten Quest wirklich
+	# aufgeben?") - sie gilt, wo sie einen Eintrag hat
+	var base = layout_name.lstrip("0123456789")
+	if base != layout_name and base != "":
+		strings.merge(ui.read_string_table(base), true)
 	return _layout.size()
 
 func text(id: int) -> String:

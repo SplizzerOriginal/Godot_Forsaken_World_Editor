@@ -22,6 +22,8 @@ extends RefCounted
 # (ai_rest_task / session_npc_cruise). Pfade aus path.sev fehlen noch.
 # Tod (kill): Respawn nach dwRefresh des Eintrags, sonst der Vorlage (1 s - 30 Tage), nur bei
 # Gebieten mit "auto_revive"; neu an zufälliger Stelle mit neuer ID.
+# Monster aus Fertigkeiten (spawn_minor, genMob): ohne Gebiet, auf dem Boden an der gegebenen Stelle, verschwinden nach ihrer
+# Lebensdauer und kommen nach dem Tod nicht wieder.
 # Sichtgitter: Zellen zu CELL m; visible() liefert die IDs im Umkreis.
 # Gestartete Gänge (moves) und Tode (died) sammelt die Map bis world.gd sie verteilt hat.
 # Im Kampf (combat.gd setzt fight, target, to) läuft ein Monster nicht umher.
@@ -63,6 +65,8 @@ var _templates: Dictionary
 var _ids: Dictionary # {"next": ...} server-weit geteilt
 var _areas: Array = []
 var _respawns: Array = [] # [Zeit, Gebiet, Eintrag] bzw. [Zeit, Sammelgebiet, Eintrag, true]
+var _minors = {} # ID -> true: Monster aus Fertigkeiten (spawn_minor) mit Lebensdauer life_end
+var tag = -1 # Welt-Nummer (maps.json tag), setzt der Server
 var _res: Array = [] # aktive Sammelgebiete
 var _rng = RandomNumberGenerator.new()
 
@@ -188,6 +192,32 @@ func _spawn(ai: int, gi: int, now: float) -> int:
 	counts["npcs" if npc else "monsters"] += 1
 	return id
 
+# Monster einer Fertigkeit (genMob, buffs.gd; wie object_interface::CreateMinors): an pos, ohne Spawn-Gebiet (area -1), lebt
+# life s und kommt nach Tod oder Ablauf nicht wieder (z.B. der Setzling 43954 aus "Segen der Erde (Säen)") -> ID, 0 = unbekannt
+func spawn_minor(tid: int, pos: Vector3, life: float, now: float) -> int:
+	var base = monster_template(tid)
+	if base.is_empty():
+		if not unknown.has(tid):
+			unknown[tid] = true
+			counts["unknown"] += 1
+		return 0
+	if terrain != null:
+		var fl = floor_y(pos.x, pos.z, pos.y)
+		pos.y = fl if not is_nan(fl) else maxf(pos.y, terrain.height(pos.x, pos.z))
+	var id = int(_ids["next"])
+	_ids["next"] = id + 1
+	var level = _level(base)
+	var hp_mp = Stats.monster_hp_mp(base, level)
+	var o = {"id": id, "tid": tid, "npc": false, "area": -1, "gen": -1, "home": pos, "pos": pos, "dir": _rng.randf_range(-PI, PI),
+		"level": level, "walk": float(base.get("walk", 0.0)), "to": null, "speed": 0.0, "cell": _cell(pos), "wander": false,
+		"next_wander": 0.0, "hp": hp_mp[0], "max_hp": hp_mp[0], "mp": hp_mp[1], "max_mp": hp_mp[1],
+		"select": int(base.get("select", 1)) != 0, "tab": int(base.get("tab", 1)) != 0, "life_end": now + maxf(1.0, life)}
+	objects[id] = o
+	_cell_add(id, o["cell"])
+	counts["monsters"] += 1
+	_minors[id] = true
+	return id
+
 func _spawn_mine(ri: int, ei: int) -> int:
 	var r: Dictionary = _res[ri]
 	var e: Dictionary = r["res"][ei]
@@ -263,6 +293,8 @@ func kill(id: int, now: float) -> bool:
 		return false
 	_remove(id)
 	died.append(id)
+	if int(o["area"]) < 0: # Monster einer Fertigkeit: kein Respawn
+		return true
 	var a: Dictionary = _areas[o["area"]]["area"]
 	if a["auto_revive"]:
 		_respawns.append([now + respawn_time(o), o["area"], o["gen"]])
@@ -280,6 +312,7 @@ func _remove(id: int) -> void:
 		return
 	_cell_del(id, o["cell"])
 	objects.erase(id)
+	_minors.erase(id)
 	counts["mines" if o.get("mine", false) else ("npcs" if o["npc"] else "monsters")] -= 1
 	moves.erase(id)
 
@@ -299,6 +332,9 @@ func tick(now: float, dt: float, near: Array) -> void:
 			_respawns.remove_at(i)
 		else:
 			i += 1
+	for id in _minors.keys(): # Lebensdauer der Fertigkeits-Monster um: verschwinden (ohne Tod)
+		if now >= float(objects[id]["life_end"]):
+			_remove(id)
 	if near.is_empty():
 		return
 	var awake = {}

@@ -34,6 +34,11 @@ extends RefCounted
 # Zepter, Harfe, Gewehr, Hammer, Kreuz, Sense), sonst HH_腰_右 / HH_腰_左<Waffenart> (Gürtel: Dolche);
 # hat das Skelett keinen, bleibt die Waffe in der Hand. place_weapons(Figur, im Kampf) schaltet um
 # (neu gebaut: Ruhe). Gebaute Waffen bleiben im Speicher des Bauers.
+# Umgewandelt (Leiste EXPORT, Performance-Fahrplan P2f2; Export/client_assets.gd): je Rassen-ECM <ecm>_player.scn (Skelett und
+# leerer AnimationPlayer) und <ecm>_player.bin ({ecm, smd_path, bon_path, base: Grundaktionen, conv}), je Grundaktion der .smd
+# <smd>_player_actions/<Name>.res, je Skin <ski>_ski.scn (MeshInstance3D, Meta tint_surfaces) und je Waffe die importierte
+# Szene (ecm_importer.gd scene_of, samt CoGfx wie im Original). Liegt das vor (und passt der Stand conv_stamp), liest der
+# Bauer keine .ecm / .smd / .bon / .stck / .ski mehr; sonst wie bisher aus den Spieldaten.
 # ====================================================
 
 const Importer = preload("ecm_importer.gd")
@@ -54,6 +59,15 @@ const WEAPON_LEFT_HOOK = "HH_lefthandweapon"
 const WEAPON_CC = "CC_weapon"
 const REST_BACK = "HH_背_%s" # Waffenart (ACTION_SUFFIXES)
 const REST_WAIST = "HH_腰_%s%s" # Seite (右 / 左), Waffenart
+const PLAYER_SCENE = "_player.scn"
+const PLAYER_BUNDLE = "_player.bin"
+const ACTIONS_SUFFIX = "_player_actions"
+const SKIN_SCENE = "_ski.scn"
+const CONV_META = "conv_code"
+# bestimmen das Ergebnis (ecm_importer.gd nicht: jede Änderung dort ließe Figuren / Skins im Editor als veraltet gelten -
+# ohne Original-Daten könnte der Client sie dann nicht neu bauen; der Export wandelt bei jeder Code-Änderung ohnehin neu um)
+const CONV_CODE = ["angelica_model_builder.gd", "angelica_model_reader.gd"]
+const GfxRefresh = preload("gfx_refresh.gd")
 
 var importer
 var data: Dictionary
@@ -77,6 +91,14 @@ var _ski_cache = {} # .ski-Pfad -> read_ski
 var _weapon_cache = {} # .ecm-Pfad -> PackedScene oder null
 var _bon_cache = {} # .bon-Pfad -> read_bon (add_actions)
 var _ecm_cache = {} # .ecm-Pfad -> read_ecm (add_actions)
+# Eingelesene Rassen-ECM (Performance-Fahrplan P2e): die Menschen-ECM ist 5 MB Text mit 1.349 Aktionen, read_ecm brauchte bei
+# jedem Bau ~390 ms (eigene Figur beim Betreten, jede andere Spielerfigur, Figurenauswahl). Gemeinsam für alle Figuren der
+# Sitzung im Speicher, dazu binär unter ECM_CACHE_DIR (~40 ms) - Schlüssel: Pfad, Dateigröße und Stand von ecm_importer.gd
+static var _ecm_shared = {} # .ecm-Pfad -> read_ecm (nur lesen, wird geteilt)
+static var _reader_stamp = ""
+static var _bundles = {} # .ecm-Pfad -> umgewandelte Figur (<ecm>_player.bin) oder {}
+static var _conv_stamp = ""
+const ECM_CACHE_DIR = "user://cache/ecm"
 
 
 func _init(data_root: String = "res://Stock-PWE-Client") -> void:
@@ -102,7 +124,10 @@ func build(p_race: int, p_gender: int, p_profession: int, look: Dictionary, acti
 	var ecm_path = importer.find_game_file(ecm_rel) if ecm_rel != "" else ""
 	if ecm_path == "":
 		return "Modell für Rasse %d / %s fehlt (%s)" % [race, _g(gender), ecm_rel]
-	var ecm = importer.read_ecm(ecm_path)
+	var conv = _converted(ecm_path)
+	if not conv.is_empty():
+		return _build_converted(conv, ecm_path, actions, look, equip)
+	var ecm = _ecm_of(ecm_path)
 	if ecm.has("error"):
 		return ecm["error"]
 	var smd_path = importer._find_model(ecm["skin_model"], ecm_path, importer._model_roots(ecm_path))
@@ -129,6 +154,30 @@ func build(p_race: int, p_gender: int, p_profession: int, look: Dictionary, acti
 	root = built["root"]
 	skeleton = root.get_node("Skeleton3D")
 	animation = root.get_node("AnimationPlayer")
+	_finish_build(ecm, ecm_path, smd_path, actions, look, equip)
+	return ""
+
+# Umgewandelte Figur: Skelett-Szene instanzieren, Aktionen aus den .res
+func _build_converted(conv: Dictionary, ecm_path: String, actions: Array, look: Dictionary, equip: Dictionary) -> String:
+	var bundle: Dictionary = conv["bundle"]
+	var ecm: Dictionary = bundle["ecm"]
+	_ecm_cache[ecm_path] = ecm
+	root = (conv["scene"] as PackedScene).instantiate()
+	skeleton = root.get_node("Skeleton3D")
+	animation = root.get_node("AnimationPlayer")
+	# eigene Bibliothek je Figur (die Skelett-Szene hat keine: eine mitgespeicherte wäre eine geteilte Unter-Ressource -
+	# nachgeladene Aktionen stünden sonst in allen Figuren und add_actions fände bei einer neuen nichts mehr, das fehlt)
+	if animation.has_animation_library(""):
+		animation.remove_animation_library("") # ältere Umwandlung
+	animation.add_animation_library("", AnimationLibrary.new())
+	_builder = null
+	_bon = {}
+	_load_actions(animation, bundle, ecm, actions)
+	_finish_build(ecm, ecm_path, bundle_smd(bundle), actions, look, equip)
+	return ""
+
+# Gemeinsamer Rest von build: Metas, Schleifen, Kleidung, Aussehen, Ausrüstung
+func _finish_build(ecm: Dictionary, ecm_path: String, smd_path: String, actions: Array, look: Dictionary, equip: Dictionary) -> void:
 	# Angriffspunkte (Ereignis 104) der gebauten Aktionen, für die Angriffs-Effekte des Spiels
 	var points = Importer.attack_points(ecm)
 	for a in points.keys():
@@ -147,7 +196,6 @@ func build(p_race: int, p_gender: int, p_profession: int, look: Dictionary, acti
 	if not equip.is_empty():
 		set_equipment(equip)
 	_take_warnings()
-	return ""
 
 # Weitere Aktionen an eine fertige Figur (build / detach) hängen, z.B. die der Fertigkeiten (einmal
 # abgespielt): baut nur die fehlenden, ergänzt attack_points / action_events -> Anzahl neu gebaut
@@ -161,6 +209,11 @@ func add_actions(figure: Node3D, actions: Array) -> int:
 	var missing = actions.filter(func(a): return a != "" and not ap.has_animation(a))
 	if missing.is_empty():
 		return 0
+	var conv = _converted(ecm_path)
+	if not conv.is_empty():
+		var n_conv = _load_actions(ap, conv["bundle"], conv["bundle"]["ecm"], missing, true)
+		_merge_action_meta(figure, conv["bundle"]["ecm"], missing)
+		return n_conv
 	if not _smd_cache.has(smd_path):
 		_smd_cache[smd_path] = importer.reader.read_smd(smd_path)
 	var smd: Dictionary = _smd_cache[smd_path]
@@ -173,7 +226,7 @@ func add_actions(figure: Node3D, actions: Array) -> int:
 	if bon.has("error"):
 		return 0
 	if not _ecm_cache.has(ecm_path):
-		_ecm_cache[ecm_path] = importer.read_ecm(ecm_path)
+		_ecm_cache[ecm_path] = _ecm_of(ecm_path)
 	var ecm: Dictionary = _ecm_cache[ecm_path]
 	var only = smd.duplicate()
 	only["skins"] = []
@@ -192,6 +245,11 @@ func add_actions(figure: Node3D, actions: Array) -> int:
 			anim.loop_mode = Animation.LOOP_NONE
 			own.add_animation(a, anim)
 			n += 1
+	_merge_action_meta(figure, ecm, missing)
+	return n
+
+# attack_points / action_events der neuen Aktionen an die Figur
+func _merge_action_meta(figure: Node3D, ecm: Dictionary, missing: Array) -> void:
 	var points: Dictionary = figure.get_meta("attack_points", {})
 	var all_points = Importer.attack_points(ecm)
 	for a in missing:
@@ -201,7 +259,165 @@ func add_actions(figure: Node3D, actions: Array) -> int:
 	var events: Dictionary = figure.get_meta("action_events", {})
 	events.merge(_events_of(ecm, missing))
 	figure.set_meta("action_events", events)
+
+# ====================================================
+# UMGEWANDELT (Leiste EXPORT)
+# ====================================================
+# Stand des Codes, der umgewandelte Figuren / Skins bestimmt (MD5, 12 Zeichen); im exportierten Spiel "export" (kein Quelltext)
+static func conv_stamp() -> String:
+	if _conv_stamp != "":
+		return _conv_stamp
+	if OS.has_feature("template"):
+		_conv_stamp = "export"
+		return _conv_stamp
+	var own: Script = Importer
+	var dir = own.resource_path.get_base_dir()
+	var ctx = HashingContext.new()
+	ctx.start(HashingContext.HASH_MD5)
+	for f in CONV_CODE:
+		var b = FileAccess.get_file_as_bytes(dir.path_join(f))
+		if not b.is_empty():
+			ctx.update(b)
+	_conv_stamp = ctx.finish().hex_encode().substr(0, 12)
+	return _conv_stamp
+
+# Passt der Stand einer umgewandelten Datei? (im exportierten Spiel immer)
+static func conv_current(code: String) -> bool:
+	return OS.has_feature("template") or code == conv_stamp()
+
+# Umgewandelte Figur einer Rassen-ECM -> {"scene": PackedScene, "bundle": {...}} oder {}
+func _converted(ecm_path: String) -> Dictionary:
+	var bundle = _bundle_of(ecm_path)
+	if bundle.is_empty():
+		return {}
+	var sp = importer.out_path(ecm_path, PLAYER_SCENE)
+	var scene = load(sp) as PackedScene if sp != "" and ResourceLoader.exists(sp) else null
+	return {"scene": scene, "bundle": bundle} if scene != null else {}
+
+func _bundle_of(ecm_path: String) -> Dictionary:
+	if _bundles.has(ecm_path):
+		return _bundles[ecm_path]
+	var b = {}
+	var p = importer.out_path(ecm_path, PLAYER_BUNDLE)
+	if p != "" and FileAccess.file_exists(p):
+		var f = FileAccess.open(p, FileAccess.READ)
+		var v = f.get_var() if f != null else null
+		if v is Dictionary and v.has("ecm") and conv_current(str(v.get("conv", ""))):
+			b = v
+	_bundles[ecm_path] = b
+	return b
+
+# .smd einer umgewandelten Figur im jetzigen Spieldaten-Ordner (smd_rel; der Ordner der Umwandlung kann ein anderer sein)
+func bundle_smd(bundle: Dictionary) -> String:
+	if bundle.has("smd_rel"):
+		return importer.data_root.path_join(str(bundle["smd_rel"]))
+	return str(bundle.get("smd_path", ""))
+
+# Ordner der umgewandelten Grundaktionen einer .smd
+func actions_dir(smd_path: String) -> String:
+	return importer.out_path(smd_path, ACTIONS_SUFFIX)
+
+# Datei einer Grundaktion im Ordner (Name wie die Animation, als Dateiname gültig)
+static func action_file(base_name: String) -> String:
+	return clean_name(base_name).validate_filename() + ".res"
+
+# Name einer Animation wie angelica_model_builder.gd _clean_name
+static func clean_name(wanted: String) -> String:
+	var n = wanted.strip_edges()
+	for c in Builder.BAD_NAME_CHARS:
+		n = n.replace(c, "_")
+	return n if n != "" else "Aktion"
+
+# Aktionen (kombinierte Namen wie smd_actions) aus den umgewandelten Grundaktionen -> Anzahl neu; once: einmal abspielen
+# (nachgeladene Aktionen wie add_actions aus den Spieldaten - gespeichert sind sie als Schleife, B26)
+func _load_actions(ap: AnimationPlayer, bundle: Dictionary, ecm: Dictionary, names: Array, once: bool = false) -> int:
+	var lib: AnimationLibrary = ap.get_animation_library("")
+	var base = {}
+	for b in bundle.get("base", []):
+		base[b] = true
+	var combined = {}
+	for c in ecm.get("actions", []):
+		if not combined.has(c["name"]):
+			combined[c["name"]] = c.get("base", [])
+	var dir = actions_dir(bundle_smd(bundle))
+	var n = 0
+	for name in names:
+		var key = clean_name(name)
+		if name == "" or lib.has_animation(key):
+			continue
+		var src = ""
+		for b in combined.get(name, []):
+			if base.has(b):
+				src = b
+				break
+		if src == "" and base.has(name):
+			src = name
+		if src == "":
+			continue
+		var p = dir.path_join(action_file(src))
+		var anim = load(p) as Animation if ResourceLoader.exists(p) else null
+		if anim == null:
+			_warn("Aktion %s: %s fehlt" % [name, p])
+			continue
+		var own: Animation = anim.duplicate()
+		if once:
+			own.loop_mode = Animation.LOOP_NONE
+		lib.add_animation(key, own)
+		n += 1
 	return n
+
+# Bauer und Skelett-Daten aus den Spieldaten (für Skins, die nicht umgewandelt sind)
+func _ensure_raw() -> bool:
+	if _builder != null and not _bon.is_empty():
+		return true
+	var smd_path = str(root.get_meta("smd_path", "")) if root != null else ""
+	if smd_path == "":
+		return false
+	if not _smd_cache.has(smd_path):
+		_smd_cache[smd_path] = importer.reader.read_smd(smd_path)
+	var smd: Dictionary = _smd_cache[smd_path]
+	if smd.has("error"):
+		return false
+	var bon_path = importer.files.resolve(smd["bon"], smd_path.get_base_dir())
+	if not _bon_cache.has(bon_path):
+		_bon_cache[bon_path] = importer.reader.read_bon(bon_path) if bon_path != "" else {"error": "Skelett fehlt"}
+	if _bon_cache[bon_path].has("error"):
+		return false
+	_bon = _bon_cache[bon_path]
+	if _builder == null:
+		_builder = Builder.new(importer.files, importer.reader, func(_src): return "")
+		_builder.extra_roots = importer.game_roots()
+	return true
+
+# read_ecm einer Rassen-ECM: aus dem Sitzungsspeicher, sonst aus dem Binär-Zwischenspeicher, sonst gelesen (und gespeichert)
+func _ecm_of(path: String) -> Dictionary:
+	if _ecm_shared.has(path):
+		return _ecm_shared[path]
+	var bundle = _bundle_of(path)
+	if not bundle.is_empty():
+		_ecm_shared[path] = bundle["ecm"]
+		return bundle["ecm"]
+	if _reader_stamp == "":
+		var src: Script = importer.get_script()
+		# exportiertes Spiel: kein Quelltext, der Leser ändert sich dort nicht
+		_reader_stamp = "export" if OS.has_feature("template") else FileAccess.get_md5(src.resource_path).substr(0, 12)
+	var file = ECM_CACHE_DIR.path_join("%s_%d_%s.bin" % [path.md5_text(), importer.files.file_size(path), _reader_stamp])
+	var ecm = {}
+	if FileAccess.file_exists(file):
+		var f = FileAccess.open(file, FileAccess.READ)
+		var v = f.get_var() if f != null else null
+		if v is Dictionary and v.has("actions"):
+			ecm = v
+	if ecm.is_empty():
+		ecm = importer.read_ecm(path)
+		if not ecm.has("error"):
+			DirAccess.make_dir_recursive_absolute(ECM_CACHE_DIR)
+			var w = FileAccess.open(file, FileAccess.WRITE)
+			if w != null:
+				w.store_var(ecm)
+				w.close()
+	_ecm_shared[path] = ecm
+	return ecm
 
 # Grundaktionen der .smd für die genannten Aktionen: die kombinierte Aktion der .ecm (CombineActName) läuft mit
 # ihrer ersten vorhandenen Grundaktion (BaseActName) unter ihrem eigenen Namen (牧师_治愈术 -> 牧师_神罚,
@@ -331,6 +547,12 @@ func _attach_weapon(rel: String, hand_hook: String, rest_bone: String, node_name
 		_warn("Waffe fehlt: " + rel)
 		return null
 	if not _weapon_cache.has(p):
+		# umgewandelt (Leiste EXPORT): die importierte Szene samt CoGfx, wenn ihr GFX-Stand passt
+		var sp: String = importer.scene_of(p)
+		var conv = load(sp) as PackedScene if sp != "" and ResourceLoader.exists(sp) else null
+		if conv != null and not GfxRefresh.outdated(conv):
+			_weapon_cache[p] = conv
+	if not _weapon_cache.has(p):
 		var r = importer.build_ecm(p)
 		var packed = null
 		if r.has("error"):
@@ -400,6 +622,19 @@ func set_skin(slot: String, rel: String) -> void:
 	if p == "":
 		_warn("Skin fehlt: " + rel)
 		return
+	var conv_path = importer.out_path(p, SKIN_SCENE)
+	if conv_path != "" and ResourceLoader.exists(conv_path):
+		var packed = load(conv_path) as PackedScene
+		if packed != null and conv_current(str(GfxRefresh._root_meta(packed, CONV_META, ""))):
+			var cmi: MeshInstance3D = packed.instantiate()
+			cmi.set_meta("slot", slot)
+			skeleton.add_child(cmi)
+			cmi.skeleton = NodePath("..")
+			_meshes[slot] = cmi
+			return
+	if not _ensure_raw():
+		_warn("Skin %s: Skelett-Daten fehlen" % rel)
+		return
 	if not _ski_cache.has(p):
 		_ski_cache[p] = importer.reader.read_ski(p)
 	var ski: Dictionary = _ski_cache[p]
@@ -463,13 +698,9 @@ func _tint(slot: String, color: Color) -> void:
 	var mi: MeshInstance3D = _meshes.get(slot)
 	if mi == null:
 		return
-	var ski: Dictionary = _ski_cache.get(importer.find_game_file(_paths[slot]), {})
-	var tex0 = _builder._texture(ski, ski["textures"][0]) if not ski.get("textures", []).is_empty() else null
-	for s in mi.mesh.get_surface_count():
+	var surfaces = tint_surfaces(mi, _builder, _ski_cache.get(importer.find_game_file(_paths[slot]), {}))
+	for s in surfaces:
 		var mat = mi.mesh.surface_get_material(s)
-		var tex = mat.albedo_texture if mat is StandardMaterial3D else (mat.get_shader_parameter("texture_albedo") if mat is ShaderMaterial else null)
-		if tex0 == null or tex != tex0:
-			continue
 		var own = mi.get_surface_override_material(s)
 		if own == null:
 			own = mat.duplicate()
@@ -492,7 +723,27 @@ func _tint(slot: String, color: Color) -> void:
 			own.set_shader_parameter("albedo", c)
 			own.set_shader_parameter("emission", e)
 
+# Flächen eines Skins mit seiner ersten Textur (die färbt das Spiel): umgewandelt als Meta tint_surfaces, sonst aus dem Skin
+static func tint_surfaces(mi: MeshInstance3D, builder, ski: Dictionary) -> Array:
+	if mi.has_meta("tint_surfaces"):
+		return mi.get_meta("tint_surfaces")
+	if builder == null or ski.get("textures", []).is_empty():
+		return []
+	var tex0 = builder._texture(ski, ski["textures"][0])
+	var out = []
+	for s in mi.mesh.get_surface_count():
+		var mat = mi.mesh.surface_get_material(s)
+		var tex = mat.albedo_texture if mat is StandardMaterial3D else (mat.get_shader_parameter("texture_albedo") if mat is ShaderMaterial else null)
+		if tex0 != null and tex == tex0:
+			out.append(s)
+	return out
+
 static func _free(n: Node) -> void:
+	# eigene (eingefärbte) Materialien erst lösen: umgewandelte Skins teilen ihr Mesh, beim sofortigen free() fragte der
+	# Renderer sonst die schon freigegebenen Materialien ab ("Parameter material is null")
+	if n is MeshInstance3D and n.mesh != null:
+		for s in n.get_surface_override_material_count():
+			n.set_surface_override_material(s, null)
 	if n.is_inside_tree():
 		n.queue_free()
 	else:

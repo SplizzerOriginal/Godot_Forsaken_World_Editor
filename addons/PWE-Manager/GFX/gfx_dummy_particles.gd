@@ -208,8 +208,7 @@ static func _variant(shader: Shader) -> Shader:
 	code = code.replace("ALPHA *= GFX_Alpha;", "ALPHA *= GFX_Alpha * v_dummy_alpha;")
 	var at = code.find("void vertex()")
 	code = code.substr(0, at) + "varying float v_dummy_alpha;\n\n" + code.substr(at)
-	var variant = Shader.new()
-	variant.code = code
+	var variant = preload("gfx_parser.gd").shared_shader(code) # gleiche Variante = ein Objekt (Performance-Fahrplan P1)
 	shader.set_meta(VARIANT_META, variant)
 	return variant
 

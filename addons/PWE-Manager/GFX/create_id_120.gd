@@ -14,7 +14,9 @@ extends Object
 #  - Affectors bekommen in Angelica das Partikel-ALTER als Zeit (ProcData.m_fTimeSpan = p->m_fTTL)
 #    und werden deshalb analytisch über das Alter ausgewertet.
 #  - IsBind: Partikel leben im Emitter-Space und folgen dem Emitter.
-#    Sonst bleiben sie dort, wo der Emitter zur Emissionszeit war.
+#    Sonst bleiben sie dort, wo der Emitter zur Emissionszeit war - innerhalb der GFX über emitter_state(t_emit), und
+#    wenn die ganze GFX sich in der Welt bewegt (an einer laufenden Figur) über die Lage-Geschichte TrailPos / TrailRot,
+#    die gfx_world_trail.gd je Bild füllt (B10).
 #
 # Basis für 121–125: Diese erben per extends "create_id_120.gd" und überschreiben
 # nur die EMITTER-HOOKS (_element_id, _gen_emitter_* usw., siehe unten).
@@ -46,7 +48,7 @@ func execute(root_node: Node):
 		push_warning("Keine Nodes mit der ID " + _element_id() + " gefunden!")
 		return
 
-	var undo_redo = EditorInterface.get_editor_undo_redo()
+	var undo_redo = Engine.get_singleton(&"EditorInterface").get_editor_undo_redo() # nur im Editor (Klasse fehlt im Export)
 	undo_redo.create_action("Create Particles for ID_" + _element_id())
 
 	# 1. Nodes nach Parent (Header) gruppieren
@@ -150,7 +152,7 @@ func _get_node_params(child: Node) -> Dictionary:
 		if constants.has("PARAMS"): return constants["PARAMS"]
 	return {}
 
-func _create_particles_with_shader(parent_node: Node3D, root_node: Node, undo_redo: EditorUndoRedoManager, max_group_time: float):
+func _create_particles_with_shader(parent_node: Node3D, root_node: Node, undo_redo, max_group_time: float):
 	if parent_node.has_node(MESH_NODE_NAME):
 		return
 
@@ -187,8 +189,7 @@ func build_particle_node(parent_node: Node, max_group_time: float) -> MeshInstan
 		mesh_instance.mesh = _build_particle_quads(pool_size)
 
 	var uniform_assignments = {}
-	var shader = Shader.new()
-	shader.code = preload("gfx_parser.gd").add_gfx_alpha(_build_shader_code(parent_node, parsed_data, param_types, max_group_time, pool_size, uniform_assignments))
+	var shader = preload("gfx_parser.gd").shared_shader(preload("gfx_parser.gd").add_gfx_alpha(_build_shader_code(parent_node, parsed_data, param_types, max_group_time, pool_size, uniform_assignments)))
 
 	var mat = ShaderMaterial.new()
 	mat.shader = shader
@@ -205,8 +206,9 @@ func build_particle_node(parent_node: Node, max_group_time: float) -> MeshInstan
 				else: mat.set_shader_parameter(uniform_name, val)
 			else: mat.set_shader_parameter(uniform_name, val)
 
-	var priority_val = int(parsed_data.get("Priority", 0))
-	mat.render_priority = clampi(priority_val, Material.RENDER_PRIORITY_MIN, Material.RENDER_PRIORITY_MAX)
+	mat.render_priority = preload("gfx_parser.gd").element_priority(parent_node, parsed_data) # Reihenfolge in der Datei, nicht Priority
+	if _as_bool(parsed_data.get("Warp", "0")): # Warp zuerst, die übrigen GFX darüber (gfx_parser.gd warp_fragment)
+		mat.render_priority = preload("gfx_parser.gd").WARP_PRIORITY
 	mesh_instance.material_override = mat
 	if dummy != "":
 		# Träger: statt der Quads die Dummy-Kopien an den Partikeln
@@ -300,7 +302,7 @@ func _build_shader_code(parent_node: Node, parsed_data: Dictionary, param_types:
 	shader_code += ";\n\n"
 
 	if has_warp:
-		shader_code += "uniform sampler2D screen_texture : hint_screen_texture, filter_linear_mipmap;\n"
+		shader_code += preload("gfx_parser.gd").WARP_UNIFORM
 
 	shader_code += "varying float v_current_time;\n"
 	shader_code += "varying vec4 v_color;\n"
@@ -485,6 +487,11 @@ func _build_shader_code(parent_node: Node, parsed_data: Dictionary, param_types:
 	shader_code += "uniform bool Emitter_Enabled = " + ("true" if _emitter_can_emit(parsed_data, emitter_ctrls) else "false") + ";\n"
 	declared["Emitter_Enabled"] = true
 	shader_code += "group_uniforms;\n\n"
+	# Lage-Geschichte der GFX in der Welt (B10, gfx_world_trail.gd): ungebundene Partikel bleiben dort, wo die GFX bei ihrer
+	# Emission war (Angelica: absolute Positionen, IsParticlePosAbs) - z.B. die Staubspur hinter dem Überfall des Kriegers.
+	# Je Probe Verschiebung (xyz) und Alter in s (w) sowie Drehung (Quaternion) der damaligen Lage im Raum von jetzt;
+	# TrailCount 0 = ohne Geschichte (statische GFX der Map)
+	shader_code += preload("gfx_parser.gd").trail_code()
 
 	# Emitter-spezifische Uniforms (Hook)
 	shader_code += _gen_emitter_uniforms(parent_node, parsed_data, declared, uniform_assignments, emitter_ctrls)
@@ -686,13 +693,15 @@ func _build_shader_code(parent_node: Node, parsed_data: Dictionary, param_types:
 	shader_code += "\t\t\t\t// Partikel-Alpha * aktuelles KeyPoint-Alpha (GetCurAlpha), unter 5/255 wird nicht gezeichnet\n"
 	shader_code += "\t\t\t\tfloat alpha = p_col.a * k_alpha;\n"
 	shader_code += "\t\t\t\tif (alpha * 255.0 >= 5.0) {\n"
+	shader_code += "\t\t\t\t\tfloat g_scale = length(MODELVIEW_MATRIX[0].xyz); // Maßstab der GFX samt Eltern (Blick-Matrix ohne Maßstab)\n"
 	shader_code += "\t\t\t\t\tfloat w_co = 1.0 - 2.0 * " + u_org1 + ";\n"
 	shader_code += "\t\t\t\t\tfloat h_co = 1.0 - 2.0 * " + u_org2 + ";\n"
 	shader_code += "\t\t\t\t\tvec2 cell_uv = UV;\n"
 	shader_code += "\t\t\t\t\tif (!" + u_3d + ") {\n"
 	shader_code += "\t\t\t\t\t\t// --- 2D PARTIKEL (Fill_Vert_2D): Kamera-Billboard, Rotation in der Bildebene ---\n"
-	shader_code += "\t\t\t\t\t\tfloat fw = " + u_noscale1 + " ? " + u_pw + " : " + u_pw + " * p_size * k_scale;\n"
-	shader_code += "\t\t\t\t\t\tfloat fh = " + u_noscale2 + " ? " + u_ph + " : " + u_ph + " * p_size * k_scale;\n"
+	shader_code += "\t\t\t\t\t\t// Größe mal Maßstab der GFX (fParentScale = GetActualScale, z.B. GfxScale 0.1 am Fuß eines NPCs, B10)\n"
+	shader_code += "\t\t\t\t\t\tfloat fw = " + u_noscale1 + " ? " + u_pw + " : " + u_pw + " * p_size * k_scale * g_scale;\n"
+	shader_code += "\t\t\t\t\t\tfloat fh = " + u_noscale2 + " ? " + u_ph + " : " + u_ph + " * p_size * k_scale * g_scale;\n"
 	shader_code += "\t\t\t\t\t\tvec3 c_view = (MODELVIEW_MATRIX * vec4(w_pos, 1.0)).xyz;\n"
 	shader_code += "\t\t\t\t\t\tvec2 off = vec2((corner.x + w_co) * fw, (corner.y - h_co) * fh);\n"
 	shader_code += "\t\t\t\t\t\tfloat cs = cos(p_rad); float sn = sin(p_rad);\n"
@@ -707,8 +716,8 @@ func _build_shader_code(parent_node: Node, parsed_data: Dictionary, param_types:
 	shader_code += "\t\t\t\t\t\t// Angelica: vMoveDir = OldPos - Pos\n"
 	shader_code += "\t\t\t\t\t\tvec3 md = o_pos - w_pos;\n"
 	shader_code += "\t\t\t\t\t\tif (length(md) < 0.000001) md = -w_move;\n"
-	shader_code += "\t\t\t\t\t\tfloat fw = (" + u_noscale1 + " ? " + u_pw + " : " + u_pw + " * p_size) * k_scale;\n"
-	shader_code += "\t\t\t\t\t\tfloat fh = (" + u_noscale2 + " ? " + u_ph + " : " + u_ph + " * p_size) * k_scale;\n"
+	shader_code += "\t\t\t\t\t\tfloat fw = (" + u_noscale1 + " ? " + u_pw + " : " + u_pw + " * p_size) * k_scale * g_scale;\n"
+	shader_code += "\t\t\t\t\t\tfloat fh = (" + u_noscale2 + " ? " + u_ph + " : " + u_ph + " * p_size) * k_scale * g_scale;\n"
 	shader_code += "\t\t\t\t\t\tvec3 c_view = (MODELVIEW_MATRIX * vec4(w_pos, 1.0)).xyz;\n"
 	shader_code += "\t\t\t\t\t\tvec3 md_view = normalize(mat3(MODELVIEW_MATRIX) * md);\n"
 	shader_code += "\t\t\t\t\t\tvec3 up_view = cross(c_view, md_view);\n"
@@ -783,13 +792,7 @@ func _build_shader_code(parent_node: Node, parsed_data: Dictionary, param_types:
 	shader_code += "\tvec4 tex_color = texture(TexFile, v_uv);\n"
 
 	if has_warp:
-		shader_code += "\n\t// --- WARP (HEAT DISTORTION, wie ID_100) ---\n"
-		shader_code += "\tvec3 normal_map = tex_color.rgb * 2.0 - 1.0;\n"
-		shader_code += "\tnormal_map = normalize(mix(vec3(0.0, 0.0, 1.0), normal_map, tex_color.a));\n"
-		shader_code += "\tvec2 warp_dir = normal_map.xy / max(normal_map.z, 0.1);\n"
-		shader_code += "\tvec2 offset = warp_dir * 0.50 * v_color.a;\n"
-		shader_code += "\tALBEDO = texture(screen_texture, SCREEN_UV + offset).rgb;\n"
-		shader_code += "\tALPHA = tex_color.a;\n"
+		shader_code += preload("gfx_parser.gd").warp_fragment("tex_color", "v_color.a")
 	else:
 		shader_code += "\ttex_color *= v_color;\n"
 		if render_blend_mode == "blend_mix":
@@ -1140,13 +1143,18 @@ func _gen_eval_particle(affectors: Array, declared: Dictionary, path_counts: Dic
 	c += "\t\tax_x = quat_rot(bind_rot, ax_x) * en_scale;\n"
 	c += "\t\tax_y = quat_rot(bind_rot, ax_y) * en_scale;\n"
 	c += "\t} else {\n"
-	c += "\t\tw_pos = ee_world + p_local;\n"
+	c += "\t\t// ungebunden: Lage der GFX zur Emissionszeit (Lage-Geschichte; ohne sie die jetzige)\n"
+	c += "\t\tvec3 t_off; vec4 t_rot = trail_at(age, t_off);\n"
+	c += "\t\tvec3 emit_now = quat_rot(t_rot, ee_world) + t_off;\n"
+	c += "\t\tw_pos = quat_rot(t_rot, ee_world + p_local) + t_off;\n"
 	c += "\t\tif (" + u_drag + ") {\n"
 	c += "\t\t\t// IsDrag: Partikel wird mit abnehmender Stärke vom Emitter mitgezogen\n"
 	c += "\t\t\tfloat portion = pow(max(0.00001, clamp(age / max(0.0001, " + u_ttl + "), 0.0, 1.0)), " + u_drag_pow + ");\n"
-	c += "\t\t\tw_pos += (1.0 - portion) * (en_world - ee_world);\n"
+	c += "\t\t\tw_pos += (1.0 - portion) * (en_world - emit_now);\n"
 	c += "\t\t}\n"
-	c += "\t\tw_move = move_dir;\n"
+	c += "\t\tw_move = quat_rot(t_rot, move_dir);\n"
+	c += "\t\tax_x = quat_rot(t_rot, ax_x);\n"
+	c += "\t\tax_y = quat_rot(t_rot, ax_y);\n"
 	c += "\t}\n"
 	c += "\tw_ax_x = ax_x;\n"
 	c += "\tw_ax_y = ax_y;\n"

@@ -7,11 +7,13 @@ extends RefCounted
 # script\NPCTaskInfo.lua (angelica_lua.gd) mit dem Bildersatz surfaces\ingame\QuestList.tga (.txt).
 # Der Server entscheidet; der Client zeigt an, was nach seinem Zustand (quests-Meldung) möglich ist:
 #   npc_entries(NPC)  Einträge des NPC-Fensters wie CDlgNPC::PopupTaskDialog: abschließbar (talk_award),
-#                     annehmbar (talk_deliver, sonst grau talk_unqualified), läuft (talk_execute)
+#                     annehmbar (talk_deliver), sichtbar aber nicht annehmbar (can_show: grey, talk_unqualified), läuft
+#                     (talk_execute)
 #   head_icon(NPC)    Symbol über dem Kopf wie CECNPCServer::UpdateCurQuestIcon (abschließbar vor
-#                     annehmbar vor läuft), Art des Bildes nach m_nTopic der Quest
+#                     annehmbar vor läuft vor nicht annehmbar = graues "!"), Art des Bildes nach m_nTopic der Quest
 #   trace()           Quest-Verfolgung: sichtbare Quests der obersten Ebene mit dem laufenden Teil; Ziele mit Links
-#                     (goals: Monster / Gegenstand, Z3), erreichtes Ziel mit Abgabe-NPC (back)
+#                     (goals: Monster / Gegenstand, Z3; Methode 11: das NPC, das die gesuchte Quest vergibt, B17),
+#                     erreichtes Ziel mit Abgabe-NPC (back)
 #   format_text()     Platzhalter wie CDlgTask::FormatTaskText (&name&, &level&, &race&, &item:ID& ...);
 #                     Koordinaten-Links &pos:(x,y,z,Welt)Name& werden zu POS_OPEN x,y,z,Welt POS_MID Name
 #                     POS_CLOSE (hud.gd macht daraus grüne Links mit Autoroute)
@@ -20,7 +22,9 @@ extends RefCounted
 #   npc_pos           Orte der Quest-NPCs aus data\task_npc.data (angelica_tasks.gd npc_positions)
 # Annehmbar heißt hier wie auf dem Server (quests.gd can_deliver): Stufe (levels: Mindeststufe aus den Server-Daten),
 # Rasse, Klasse, Geschlecht, Vorquests (13008 gilt als erfüllt), Vorbedingungs-Gegenstände (m_PremItems), Ausschluss, Mit-Quests (m_ulPremise_Cotask, m_ulCoTaskCond 1 = alle), Effekte (m_PremBuff),
-# nicht laufend, erledigt nur wiederholbar, keine noch nicht geprüfte Vorbedingung (angelica_tasks.gd UNSUPPORTED).
+# nicht laufend, erledigt nur wiederholbar, keine noch nicht geprüfte Vorbedingung (angelica_tasks.gd UNSUPPORTED), dazu
+# need_buffs aus den Server-Daten (B20). Sichtbar (can_show) wie ATaskTempl::CanShowTask: die Bedingungen mit m_bShowBy*-Schalter
+# nur, wenn er gesetzt ist - so zeigt z.B. das Grab des Werwolf-Gottes "Lauscht dem Ruf" grau, bis der Blut-Effekt da ist.
 # Methode 11 "Quest mehrmals erfüllen": Ziel "<Quest> n/Anzahl" nach dem Fortschritt n des Servers.
 # Belohnung im Quest-Fenster (log_entries): EXP (Z5), Goldmünzen und Seelenmünzen (Z4) wie der Server (stats.gd task_money:
 # m_bGoldRevise -> * Faktor der Figurenstufe aus PLAYER_TALENT_CONFIG der elements.data), Text über money_text.
@@ -70,6 +74,8 @@ var money_text: Callable = func(copper): return str(copper) # Kupfer -> "x Gold 
 var _money_factors = null # [task_money_factor, task_bind_money_factor, task_factor] (PLAYER_TALENT_CONFIG)
 var _services = {} # NPC-Vorlage -> [Ausgabe, Annahme]
 var levels = {} # Quest (oberste Ebene) -> [Mindest-, Höchststufe] aus SERVER_QUESTS
+var limited = {} # Quest (oberste Ebene) -> true: mit Höchstzahl (max_fin), erledigt dann nicht mehr grau anzeigen
+var need_buffs = {} # Quest -> [[Effekt, Mindest-Stufe, muss haben]] zur Vergabe (SERVER_QUESTS, Wunsch des Spielers B20)
 
 
 # Im Thread: tasks.data der Sprache indizieren -> "" oder Fehlertext
@@ -84,13 +90,15 @@ func open(data_root: String, language: String) -> String:
 	if err != "":
 		return err
 	tasks.index_all()
-	_read_levels()
+	_read_server()
 	npc_pos = script.npc_positions(files, language)
 	_read_icons(files, language)
 	return ""
 
-func _read_levels() -> void:
+func _read_server() -> void:
 	levels = {}
+	limited = {}
+	need_buffs = {}
 	var d = JSON.parse_string(FileAccess.get_file_as_string(SERVER_QUESTS)) if FileAccess.file_exists(SERVER_QUESTS) else null
 	if not d is Dictionary:
 		warnings.append("Quest-Stufen fehlen (%s), Mindeststufen unbekannt" % SERVER_QUESTS)
@@ -98,8 +106,14 @@ func _read_levels() -> void:
 	var all: Dictionary = d.get("tasks", {})
 	for k in all:
 		var t: Dictionary = all[k]
-		if t.has("lv") and not t.has("p"):
+		if t.has("p"):
+			continue
+		if t.has("lv"):
 			levels[int(k)] = [int(t["lv"][0]), int(t["lv"][1])]
+		if t.has("max_fin"):
+			limited[int(k)] = true
+		if t.has("need_buffs"):
+			need_buffs[int(k)] = t["need_buffs"]
 
 # Stufen einer Quest [min, max] (0 = ohne Grenze)
 func level_range(t: Dictionary) -> Array:
@@ -166,37 +180,66 @@ func is_active(id: int) -> bool:
 
 func can_deliver(id: int) -> bool:
 	var t = task(id)
+	return _base_ok(id) and _level_ok(t) and _occ_ok(t) and _gender_ok(t) and _pre_ok(t) and _items_ok(t) and _cotask_ok(t) \
+		and buffs_ok(need_buffs.get(id, []), true)
+
+# Sichtbar wie ATaskTempl::CanShowTask, soweit der Client es prüfen kann: oberste Ebene, nicht laufend, erledigt nur
+# wiederholbar (mit Höchstzahl max_fin nicht mehr: die Zählung kennt nur der Server), Rasse, Ausschluss, Effekte
+# (m_PremBuff); Stufe, Klasse, Geschlecht, Vorquests, Gegenstände und Mit-Quests nur mit ihrem m_bShowBy*-Schalter.
+# Sichtbar, aber nicht annehmbar: graues "!" (QBT_CAN_NOT_GET) und grauer Eintrag im NPC-Fenster (talk_unqualified)
+func can_show(id: int) -> bool:
+	var t = task(id)
+	if not _base_ok(id) or (done.has(id) and limited.has(id)):
+		return false
+	return (not tasks.field(t, "m_bShowByLev") or _level_ok(t)) and (not tasks.field(t, "m_bShowByOccup") or _occ_ok(t)) \
+		and (not tasks.field(t, "m_bShowByGender") or _gender_ok(t)) and (not tasks.field(t, "m_bShowByPreTask") or _pre_ok(t)) \
+		and (not tasks.field(t, "m_bShowByItems") or _items_ok(t)) and (not tasks.field(t, "m_bShowByCoTask") or _cotask_ok(t))
+
+# Bedingungen, die Annehmen und Anzeigen gemeinsam haben (CanShowTask prüft sie immer)
+func _base_ok(id: int) -> bool:
+	var t = task(id)
 	if t.is_empty() or t["parent"] != 0 or active.has(id) or not tasks.unsupported(t).is_empty():
 		return false
 	if done.has(id) and not t["can_redo"]:
 		return false
-	var lv = int(player.get("level", 1))
-	var range = level_range(t)
-	if (range[0] != 0 and lv < range[0]) or (range[1] != 0 and lv > range[1]):
-		return false
 	if not t["races"].is_empty() and not int(player.get("race", 0)) in t["races"]:
 		return false
-	if not t["occupations"].is_empty() and not int(player.get("class", 0)) in t["occupations"]:
-		return false
-	var g = int(t["gender"])
-	if (g == 1 and int(player.get("gender", 0)) != 0) or (g == 2 and int(player.get("gender", 0)) != 1):
-		return false
-	for pre in t["premise_tasks"]:
-		if not done.has(int(pre)) and not DONE_BY_DEFAULT.has(int(pre)):
-			return false
-	for it in t.get("premise_items", []): # Gegenstände in der Tasche (z.B. Prüfungs-Essenzen für den Tausch)
-		if int(item_count.call(int(it["id"]))) < int(it["num"]):
-			return false
 	for m in tasks.field(t, "m_ulMutexTasks"):
 		if int(m) != 0 and (active.has(int(m)) or done.has(int(m))):
 			return false
-	var co = int(tasks.field(t, "m_ulPremise_Cotask_Cnt"))
-	if co > 0:
-		var ids = (tasks.field(t, "m_ulPremise_Cotask") as Array).slice(0, co).filter(func(x): return int(x) != 0)
-		var running = ids.filter(func(x): return active.has(int(x))).size()
-		if (running < ids.size()) if int(tasks.field(t, "m_ulCoTaskCond")) != 0 else running == 0:
-			return false
 	return buffs_ok(tasks.buff_list(tasks.field(t, "m_PremBuff"), int(tasks.field(t, "m_ulPremBuffCnt"))), bool(tasks.field(t, "m_bPremBuffCond")))
+
+func _level_ok(t: Dictionary) -> bool:
+	var lv = int(player.get("level", 1))
+	var range = level_range(t)
+	return not ((range[0] != 0 and lv < range[0]) or (range[1] != 0 and lv > range[1]))
+
+func _occ_ok(t: Dictionary) -> bool:
+	return t["occupations"].is_empty() or int(player.get("class", 0)) in t["occupations"]
+
+func _gender_ok(t: Dictionary) -> bool:
+	var g = int(t["gender"])
+	return not ((g == 1 and int(player.get("gender", 0)) != 0) or (g == 2 and int(player.get("gender", 0)) != 1))
+
+func _pre_ok(t: Dictionary) -> bool:
+	for pre in t["premise_tasks"]:
+		if not done.has(int(pre)) and not DONE_BY_DEFAULT.has(int(pre)):
+			return false
+	return true
+
+func _items_ok(t: Dictionary) -> bool:
+	for it in t.get("premise_items", []): # Gegenstände in der Tasche (z.B. Prüfungs-Essenzen für den Tausch)
+		if int(item_count.call(int(it["id"]))) < int(it["num"]):
+			return false
+	return true
+
+func _cotask_ok(t: Dictionary) -> bool:
+	var co = int(tasks.field(t, "m_ulPremise_Cotask_Cnt"))
+	if co <= 0:
+		return true
+	var ids = (tasks.field(t, "m_ulPremise_Cotask") as Array).slice(0, co).filter(func(x): return int(x) != 0)
+	var running = ids.filter(func(x): return active.has(int(x))).size()
+	return not ((running < ids.size()) if int(tasks.field(t, "m_ulCoTaskCond")) != 0 else running == 0)
 
 # Zustand einer Fenster-Quest für Shylias Markt (wie GameApi.GetTaskStatus): 2 annehmbar, 4 erledigt (nicht wiederholbar),
 # 1 sonst
@@ -313,6 +356,10 @@ func npc_entries(tid: int) -> Array:
 				running.append(_entry(id, QBT_CAN_NOT_FINISH, "talk_execute"))
 		elif can_deliver(id):
 			get.append(_entry(id, QBT_CAN_GET, "talk_deliver"))
+		elif can_show(id): # CDlgNPC: sichtbar, aber nicht annehmbar -> grau mit dem Text "nicht erfüllt" (GetUnqualifiedTalk)
+			var e = _entry(id, QBT_CAN_GET, "talk_unqualified")
+			e["grey"] = true
+			get.append(e)
 	var out = []
 	for e in finish + get + running:
 		var tk: Dictionary = e["talk"]
@@ -354,6 +401,12 @@ func head_icon(tid: int) -> String:
 			if active.has(id) and not can_finish(id) and task(id).get("subs", [1]).is_empty():
 				kind = QBT_CAN_NOT_FINISH
 				top_topic = mini(top_topic, topic(task(id)))
+	if kind == 0:
+		for id in sv[0]: # graues "!": sichtbar, aber (noch) nicht annehmbar
+			var t = task(id)
+			if not t.is_empty() and not hidden(t) and can_show(id):
+				kind = QBT_CAN_NOT_GET
+				top_topic = mini(top_topic, topic(t))
 	if kind == 0:
 		return ""
 	return icons.get([kind, top_topic], icons.get([kind, 0], ""))
@@ -480,6 +533,14 @@ func goal_parts(t: Dictionary) -> Array:
 			return t["monsters"].map(func(m): return {"text": _monster_goal(m, id), "link": "mon:%d:%d" % [int(m["id"]), id]})
 		2:
 			return t["items"].map(func(i): return {"text": _item_goal(i), "link": "item:%d:%d" % [int(i["id"]), id]})
+		METHOD_FINISH_TASK:
+			# "Quest erfüllen" (z.B. 15358 "Segen des Wolfs" wartet auf 15396 "Lauscht dem Ruf"): solange die gesuchte Quest
+			# nicht läuft, führt der Link zum NPC, das sie vergibt (Grab des Werwolf-Gottes, m_bCanSeekOut); läuft sie, steht
+			# sie mit ihren eigenen Zielen in der Verfolgung
+			var want = int(tasks.field(t, "m_ulFinishTaskID"))
+			var npc = int(task(want).get("delv_npc", 0)) if want != 0 else 0
+			if npc != 0 and not active.has(want) and not can_finish(id):
+				return [{"text": goal_text(t, func(_x): return ""), "link": "npc:%d" % npc}]
 	return []
 
 # Monster-Ziel: Beute in der Tasche ("Beute 3/10") bzw. Kills laut Fortschritt ("Wildschwein 2/5")

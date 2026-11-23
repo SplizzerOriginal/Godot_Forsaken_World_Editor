@@ -27,6 +27,11 @@ const SHADER_2SIDED = preload("../ECM/angelica_litmodel_2s.gdshader")
 const BUILDING_FLAGS_VERSION = 0x80000001
 const MESH_VERSIONS = [0x10000002, 0x10000003, 0x10000004, 0x10000005, 0x10000006, 0x10000100]
 const MESH_LIGHTMAP_VERSION = 0x10000100
+# Gebäude-Kollision vorab (Performance-Fahrplan P2b): der Map-Import speichert sie als <map><COLLISION_SUFFIX> neben die
+# Map-Szene, der Client lädt sie statt sie bei jedem Betreten aus den Hüllen zu rechnen (s9 3,1 s, s31 2,1 s)
+const COLLISION_SUFFIX = "_collision.res"
+const COLLISION_STAMP_META = "collision_code"
+static var _collision_stamp = ""
 
 var importer # ecm_importer.gd
 var _builder = null
@@ -78,6 +83,36 @@ func read_bmd(path: String) -> Dictionary:
 		meshes.append(m)
 	out["meshes"] = meshes
 	return out
+
+# Stand des Codes, der die Kollision baut (MD5 über dieses Skript und Server/brushes.gd): eine gespeicherte Kollision mit
+# anderem Stand rechnet der Client neu
+static func collision_stamp() -> String:
+	if _collision_stamp == "" and OS.has_feature("template"):
+		_collision_stamp = "export" # exportiertes Spiel ohne Quelltext (world_screen.gd nimmt die gespeicherte Kollision)
+	if _collision_stamp == "":
+		var ctx = HashingContext.new()
+		ctx.start(HashingContext.HASH_MD5)
+		var own: Script = load("res://addons/PWE-Manager/MAP/angelica_buildings.gd")
+		var br: Script = Brushes
+		for p in [own.resource_path, br.resource_path]:
+			ctx.update(FileAccess.get_file_as_bytes(p))
+		_collision_stamp = ctx.finish().hex_encode()
+	return _collision_stamp
+
+# Kollision der Gebäude einer Map als Form (Dreiecke beider Seiten) mit Meta buildings / hulls / errors / source und dem
+# Stand des Codes -> ConcavePolygonShape3D, null ohne Gebäude-Liste bzw. ohne Dreiecke
+func collision_shape(map_name: String) -> ConcavePolygonShape3D:
+	var r = collision_faces(map_name)
+	if (r["faces"] as PackedVector3Array).is_empty():
+		return null
+	var shape = ConcavePolygonShape3D.new()
+	shape.backface_collision = true
+	shape.set_faces(r["faces"])
+	for k in ["buildings", "hulls", "errors"]:
+		shape.set_meta(k, r[k])
+	shape.set_meta("source", "Gebäude")
+	shape.set_meta(COLLISION_STAMP_META, collision_stamp())
+	return shape
 
 # Kollision der Gebäude einer Map wie CECOrnament / CECBrushMan: die Hüllen aller Gebäude, die die Map nennt (.ecbsd, auch
 # "nur Kollision", z.B. die Höhlenwände von s11), als Dreiecke (Server/brushes.gd triangles, beide Seiten nutzen) ->

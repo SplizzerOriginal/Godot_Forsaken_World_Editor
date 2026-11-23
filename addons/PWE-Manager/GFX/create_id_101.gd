@@ -8,7 +8,7 @@ func execute(root_node: Node):
 		push_warning("Keine Nodes mit der ID 101 gefunden!")
 		return
 		
-	var undo_redo = EditorInterface.get_editor_undo_redo()
+	var undo_redo = Engine.get_singleton(&"EditorInterface").get_editor_undo_redo() # nur im Editor (Klasse fehlt im Export)
 	undo_redo.create_action("Create Sprite3D for ID_101")
 	
 	# 1. Nodes nach Parent (Header, z.B. "八卦绿") gruppieren
@@ -153,12 +153,11 @@ func _create_sprite_with_shader(parent_node: Node3D, root_node: Node, undo_redo,
 		return
 		
 	var mat = ShaderMaterial.new()
-	var shader = Shader.new()
+	var shader: Shader = null # aus dem gemeinsamen Vorrat (gfx_parser.gd shared_shader), unten
 	# ====================================================
 	# 0. RENDER MODE, DESTBLEND & PRIORITY MAPPING
 	# ====================================================
 	var render_blend_mode = "blend_mix" # Standard-Fallback
-	var priority_val = 0 # Standard Priority
 	var repeat_count_val = 1.0 # Standard ist 1 Durchlauf
 	
 	# DestBlend auslesen
@@ -174,12 +173,6 @@ func _create_sprite_with_shader(parent_node: Node3D, root_node: Node, undo_redo,
 	elif dest_blend_val == "6":
 		render_blend_mode = "blend_mix"
 		
-	# --- NEU: Priority auslesen ---
-	if parsed_data.has("Priority"):
-		priority_val = int(parsed_data["Priority"])
-	elif parsed_data.has("MainParameters") and typeof(parsed_data["MainParameters"]) == TYPE_DICTIONARY:
-		if parsed_data["MainParameters"].has("Priority"):
-			priority_val = int(parsed_data["MainParameters"]["Priority"])
 	
 	
 
@@ -212,7 +205,7 @@ func _create_sprite_with_shader(parent_node: Node3D, root_node: Node, undo_redo,
 	shader_code += ";\n\n"
 	
 	if has_warp:
-		shader_code += "uniform sampler2D screen_texture : hint_screen_texture, filter_linear_mipmap;\n"
+		shader_code += preload("gfx_parser.gd").WARP_UNIFORM
 	# ====================================================
 
 	# Variable zur Zeitübertragung vom Vertex- in den Fragment-Shader
@@ -1391,11 +1384,6 @@ func _create_sprite_with_shader(parent_node: Node3D, root_node: Node, undo_redo,
 	var p_main = parsed_data.get("MainParameters", {}) if typeof(parsed_data.get("MainParameters")) == TYPE_DICTIONARY else {}
 	
 	# UV Manipulation nur in den Shader schreiben, wenn sie existiert
-	if parsed_data.has("UVExchg") or p_main.has("UVExchg"):
-		shader_code += "\tif (UVExchg) {\n"
-		shader_code += "\t\tfinal_uv = final_uv.yx;\n"
-		shader_code += "\t}\n"
-		
 	if parsed_data.has("UReverse") or p_main.has("UReverse"):
 		shader_code += "\tif (UReverse) {\n"
 		shader_code += "\t\tfinal_uv.x = 1.0 - final_uv.x;\n"
@@ -1465,6 +1453,14 @@ func _create_sprite_with_shader(parent_node: Node3D, root_node: Node, undo_redo,
 		
 		shader_code += "\t}\n" # Schließt den if(TileMode) oder den Fallback-Block
 
+	# UVExchg erst nach Umkehr und Bild der Folge (A3DDecalEx: fU / fV im Feld m_fTexU / m_fTexWid, UReverse /
+	# VReverse, dann gfx_swap(fU, fV)) - vorher schnitt der Tausch bei Bildfolgen ein Feld quer durch alle Bilder
+	# (Blitzschläger 闪电剑刀效果: 闪电.dds 1 x 4 mit UVExchg zeigte vier Blitze nebeneinander statt einem)
+	if parsed_data.has("UVExchg") or p_main.has("UVExchg"):
+		shader_code += "\tif (UVExchg) {\n"
+		shader_code += "\t\tfinal_uv = final_uv.yx;\n"
+		shader_code += "\t}\n"
+
 	# 4. Textur auslesen (dieser Teil bleibt immer gleich)
 	shader_code += "\n\tvec4 tex_color = texture(TexFile, final_uv);\n"
 	#########################################################################
@@ -1472,32 +1468,8 @@ func _create_sprite_with_shader(parent_node: Node3D, root_node: Node, undo_redo,
 	# FARBAUSGABE ODER WARP-VERZERRUNG
 	# ====================================================
 	if has_warp:
-		shader_code += "\n\t// --- WARP (HEAT DISTORTION / LINSE) ---\n"
 		shader_code += "\tif (Warp) {\n"
-		
-		# 1. Normalmap entschlüsseln
-		shader_code += "\t\tvec3 normal_map = tex_color.rgb * 2.0 - 1.0;\n"
-		shader_code += "\t\tnormal_map = mix(vec3(0.0, 0.0, 1.0), normal_map, tex_color.a);\n"
-		shader_code += "\t\tnormal_map = normalize(normal_map);\n"
-		
-		# 2. DIE ECHTE LINSEN-KRÜMMUNG (Refraction Math):
-		# Indem wir durch Z teilen, bricht das Licht an den Kanten der Normalmap extrem stark.
-		# Das erzeugt den perfekten, dreidimensionalen Lupen-Effekt!
-		shader_code += "\t\tvec2 warp_dir = normal_map.xy / max(normal_map.z, 0.1);\n"
-		
-		# 3. OFFSET BERECHNEN:
-		# v_base_color.a (Das Ein-/Ausblenden des Effekts) reduziert nur noch die STÄRKE,
-		# macht das Objekt aber nicht mehr transparent! Das verhindert milchiges Ghosting.
-		shader_code += "\t\tvec2 offset = warp_dir * 0.50 * v_base_color.a;\n"
-		
-		# 4. Verzerrten Hintergrund holen
-		shader_code += "\t\tvec3 distorted_bg = texture(screen_texture, SCREEN_UV + offset).rgb;\n"
-		shader_code += "\t\tALBEDO = distorted_bg;\n"
-		
-		# 5. ALPHA LÖSUNG:
-		# Wir nutzen NUR noch die Form der Textur, damit der unsichtbare Rahmen weg bleibt.
-		shader_code += "\t\tALPHA = tex_color.a;\n"
-		
+		shader_code += preload("gfx_parser.gd").warp_fragment("tex_color", "v_base_color.a", "\t\t")
 		shader_code += "\t} else {\n"
 		shader_code += "\t\t// Warp ist aus -> Sprite GANZ NORMAL zeichnen\n"
 		shader_code += "\t\ttex_color *= v_base_color;\n"
@@ -1523,7 +1495,7 @@ func _create_sprite_with_shader(parent_node: Node3D, root_node: Node, undo_redo,
 	shader_code += "}\n"
 		
 	
-	shader.code = preload("gfx_parser.gd").add_gfx_alpha(shader_code)
+	shader = preload("gfx_parser.gd").shared_shader(preload("gfx_parser.gd").add_gfx_alpha(shader_code))
 	mat.shader = shader
 	
 	for uniform_name in uniform_assignments.keys():
@@ -1546,7 +1518,9 @@ func _create_sprite_with_shader(parent_node: Node3D, root_node: Node, undo_redo,
 				mat.set_shader_parameter(uniform_name, val)
 	
 	# Priority an den Shader (für den Z-Achsen Offset)
-	mat.render_priority = priority_val
+	mat.render_priority = preload("gfx_parser.gd").element_priority(parent_node, parsed_data) # Reihenfolge in der Datei, nicht Priority
+	if warp_active: # Warp zuerst, die übrigen GFX darüber (gfx_parser.gd warp_fragment)
+		mat.render_priority = preload("gfx_parser.gd").WARP_PRIORITY
 	sprite.material_override = mat
 	
 	# ====================================================

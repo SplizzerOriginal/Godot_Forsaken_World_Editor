@@ -120,6 +120,15 @@ extends RefCounted
 # Version 22 (Gegenstände): item_destroy {pos, id} -> {pos} (ganzer Stapel weg wie c2s_CmdDestroyItem; ITEM_INVALID wenn dort
 #   nicht id liegt, ITEM_NOT_DESTROYABLE bei proc 0x400); gather: GATHER_NEED_TOOL, wenn der Sammelpunkt ein Werkzeug
 #   verlangt (tools) und keins in der Tasche ist - das Werkzeug wird nach Wahrscheinlichkeit verbraucht (Fackel-Quests)
+# Version 23 (Bug-Fahrplan B17): item_use auf einen Fertigkeits-Gegenstand (cast, z.B. 44134 "Blut des Werwolfgottes")
+#   -> {id (Gegenstand), pos, skill, time (ms), act}: die Fertigkeit wird gewirkt wie ein Einsetzen (skill_start an die
+#   anderen, skill_end an alle; SKILL_BUSY, SKILL_COOLDOWN, SKILL_LEVEL_LOW); Quest-Belohnungen mit buff wirken eine
+#   Fertigkeit auf die Figur (Effekte kommen mit buffs); debug_item {id, count} -> {pos} (Tests, nur mit debug_commands:
+#   Gegenstand in die Tasche)
+# Version 24 (B19 Quest aufgeben): quest_where kind "npc" (NPC-Vorlage: Ort aus den Spawn-Daten des Servers - die
+#   task_npc.data des Clients ist neuer, z.B. Werwolf-NPCs in s43 statt s31); quest_abandon zieht wie im Original die
+#   Gegenstände der Quest ein (mitgegebene, mit clear gesammelte / erbeutete) und löscht Quests mit giveup_clear ganz
+#   (kein quest_event "failed")
 #   debug_state {state, target, time, values} -> {ok}   Effekt anlegen (Tests; nur mit Server-Einstellung
 #                                       debug_commands, sonst NOT_ALLOWED); target 0 = die eigene Figur
 # Welt (nach world_ready):
@@ -148,9 +157,14 @@ extends RefCounted
 # Die Codes TIMEOUT, DISCONNECTED, NOT_CONNECTED, CONNECT_FAILED setzt der Client selbst.
 # ====================================================
 
-const VERSION = 22
+const VERSION = 24
 const DEFAULT_PORT = 29000
 const REQUEST_TIMEOUT = 10.0 # Sekunden bis eine Anfrage ohne Antwort scheitert
+# ENet-Zeitlimits je Verbindung (ENetPacketPeer.set_timeout): erst nach NET_TIMEOUT_MS ohne Bestätigung (spätestens nach
+# dem Doppelten) gilt die Gegenseite als weg. Die ENet-Vorgabe (5 s) warf Clients hinaus, die beim Laden einer großen Map
+# (s31) mehrere Sekunden nicht antworten (Bug-Fahrplan B16); der Server nimmt seine Einstellung net_timeout (s).
+const NET_TIMEOUT_LIMIT = 32
+const NET_TIMEOUT_MS = 30000
 const CONNECT_TIMEOUT = 8.0
 const HELLO_TIMEOUT = 15.0 # Server trennt Verbindungen ohne "hello" ...
 const LOGIN_TIMEOUT = 300.0 # ... und ohne Anmeldung

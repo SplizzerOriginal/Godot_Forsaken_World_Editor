@@ -26,21 +26,27 @@ extends SceneTree
 #   Client ist die Mindeststufe immer 0; geprüft an 330 Höchststufen, 310 gleich), race, occ, gender, pre (Vorquests), mutex (Ausschluss),
 #   prem [[ID, Anzahl, deposit]] (Gegenstände in der Tasche, deposit = bei der Vergabe eingezogen), max_fin [Anzahl, Art]
 #   (m_bRecFinishCount: höchstens so oft erfüllen, Art 0 insgesamt, 1 je Tag, 2 je Woche - z.B. Cocktail-Tausch 5 / Tag),
-#   given (Gegenstände bei Vergabe), mon (Monster: id, num Kills; drop / drop_num / prob / common: statt
+#   giveup_clear (m_bClearAsGiveUp: Aufgeben löscht die Quest ganz, ohne Misserfolg), keep_cmn (m_bNotClearCommonItem: bei
+#   Misserfolg bleiben gewöhnliche gesammelte Gegenstände), given (Gegenstände bei Vergabe; task = Quest-Gegenstand: bei Misserfolg
+#   oder Aufgeben alle Stück zurück, sonst höchstens num - ATaskTempl::TakeAwayGivenItems), mon (Monster: id, num Kills; drop / drop_num / prob / common: statt
 #   der Kills zählt ein Gegenstand, den das Monster mit prob fallen lässt, common = gewöhnlicher statt
 #   Quest-Gegenstand), clear (m_bClearAcquired: gesammelte / erbeutete Gegenstände beim Abschluss
-#   einziehen), items (zu sammeln), time (Zeitlimit s), wait
+#   einziehen), items (zu sammeln: id, num; dep = m_bDeposit, mit clear beim Abschluss eingezogen, task = Quest-Gegenstand:
+#   alle Stück, sonst höchstens num - wie ATaskTempl::RemoveAcquiredItem, z.B. 15766 nimmt das Blut 44134), time (Zeitlimit s), wait
 #   (Methode 5 "Warten": Sekunden bis erfüllt), redo_fail (nach Misserfolg wieder annehmbar),
 #   cotask (Mit-Quest: diese Quests müssen laufen, alle bzw. mit cotask_any eine davon; m_ulPremise_Cotask /
 #   m_ulCoTaskCond), fin [Quest, Anzahl] (Methode 11: so oft erfüllen, während diese Quest läuft;
 #   m_ulFinishTaskID / m_ulFinishTaskTimes - z.B. 15358 "Segen des Wolfs" wartet auf 15396 "Lauscht dem Ruf"),
 #   buffs [[Effekt, Mindest-Stufe, muss haben]] (Vorbedingung; buffs_all = alle, sonst einer; m_PremBuff),
 #   fin_buffs / fin_buffs_all (dasselbe beim Abschluss, m_FinBuff - z.B. 6967 "Erste Begegnung": Effekt 914),
+#   need_buffs (nur aus PLAY_FIXES: Effekte zur Vergabe, die Quest bleibt sichtbar - graues "!"),
 #   award {exp, gold (Goldmünzen, m_ulGoldNum), bind (Seelenmünzen, m_iBindMoney), money_lev (m_bGoldRevise:
 #   gold und bind * Stufenfaktor der Figur, höchstens der Stufe money_lev - class_templates.json
 #   task_money_factor / task_bind_money_factor), exp_lev / exp_fix (m_bExpRevise: exp * task_factor[min(Stufe, exp_lev) - 1];
 #   m_bExpFix: * task_factor[exp_lev - 1]), new (Folgequest), items [{random, items: [{id, num, prob}]}], skill [ID, Stufe] (Fertigkeit
-#   lernen, AWARD_DATA m_lSkillID / m_lSkillLev: z.B. die Rassen-Segen 8702 - 8706 / 15802), del_skill (vergessen)},
+#   lernen, AWARD_DATA m_lSkillID / m_lSkillLev: z.B. die Rassen-Segen 8702 - 8706 / 15802), del_skill (vergessen),
+#   buff [Fertigkeit, Stufe] (m_lBuffId / m_lBuffLev: der Server wirkt die Fertigkeit auf die Figur, wie
+#   TaskInterface::DeliverBuff - z.B. 15790 "Wunsch der Ahnen" -> 4571 mit Effekt 2885 der Werwolf-Kette)},
 #   block: Felder mit Bedingungen, die der Server noch nicht prüft (Zeitplan, Gebiet, Gilde, Gruppe,
 #   Ruf, Gegenstände ...; angelica_tasks.gd UNSUPPORTED) - eine solche Quest vergibt er nicht.
 # ====================================================
@@ -56,6 +62,11 @@ const SERVER_TASK_VERSION = 179
 const SERVER_AUTO_OFFSET = 206
 const SERVER_LEV_OFFSET = 431 # m_ulPremise_Lev_Min (443 der v181-Struktur - 12), Lev_Max 4 Bytes dahinter
 const METHOD_FINISH_TASK = 11 # Methode "Quest mehrmals erfüllen" (m_ulFinishTaskID, m_ulFinishTaskTimes)
+# Abweichungen vom Original auf Wunsch des Spielers (nicht aus der tasks.data): need_buffs [[Effekt, Mindest-Stufe, muss haben]]
+# = zur Vergabe nötige Effekte (alle), die die Quest nicht verstecken (der Client zeigt dann ein graues "!" statt keins).
+# B20: 15396 "Lauscht dem Ruf" am Grab erst mit dem Blut-Effekt 2886 (Blut des Werwolfgottes 44134) - sonst lief
+# "Wunsch der Ahnen" (2885, 20 s) ohne das Blut ab und die Kette hing bis zum Aufgeben (im Original genauso)
+const PLAY_FIXES = {15396: {"need_buffs": [[2886, 0, true]]}}
 var server_auto = {} # Quest (oberste Ebene) -> m_bAutoDeliver der Server-tasks.data
 var server_lv = {} # Quest (oberste Ebene) -> [m_ulPremise_Lev_Min, m_ulPremise_Lev_Max] der Server-tasks.data
 
@@ -126,7 +137,8 @@ func _quest(t, q: Dictionary, block_counts: Dictionary) -> Dictionary:
 	var flags = {"auto": auto, "redo": q["can_redo"], "giveup": q["can_give_up"],
 		"order": t.field(q, "m_bExeChildInOrder"), "one": t.field(q, "m_bChooseOne"), "rand": t.field(q, "m_bRandOne"),
 		"psucc": t.field(q, "m_bParentAlsoSucc"), "pfail": t.field(q, "m_bParentAlsoFail"), "hidden": t.field(q, "m_bHidden"),
-		"key": t.field(q, "m_bKeyTask"), "ui": t.field(q, "m_bUIButtonTask")}
+		"key": t.field(q, "m_bKeyTask"), "ui": t.field(q, "m_bUIButtonTask"), "giveup_clear": t.field(q, "m_bClearAsGiveUp"),
+		"keep_cmn": t.field(q, "m_bNotClearCommonItem")}
 	for k in flags:
 		if flags[k]:
 			o[k] = true
@@ -156,6 +168,8 @@ func _quest(t, q: Dictionary, block_counts: Dictionary) -> Dictionary:
 			o[k[0]] = bl
 			if t.field(q, k[3]):
 				o[k[0] + "_all"] = true
+	if PLAY_FIXES.has(q["id"]):
+		o.merge(PLAY_FIXES[q["id"]], true)
 	if int(q["method"]) == METHOD_FINISH_TASK and int(t.field(q, "m_ulFinishTaskID")) != 0:
 		o["fin"] = [int(t.field(q, "m_ulFinishTaskID")), maxi(1, int(t.field(q, "m_ulFinishTaskTimes")))]
 	if t.field(q, "m_bCanRedoAfterFailure"):
@@ -168,6 +182,17 @@ func _quest(t, q: Dictionary, block_counts: Dictionary) -> Dictionary:
 	for k in [["given", "given_items"], ["items", "items"]]:
 		if not q[k[1]].is_empty():
 			o[k[0]] = q[k[1]].map(func(it): return {"id": it["id"], "num": it["num"]})
+	# gesuchte Gegenstände mit m_bDeposit: werden beim Abschluss eingezogen (mit clear, RemoveAcquiredItem); gewöhnliche
+	# (m_bCommonItem) höchstens num Stück, Quest-Gegenstände alle
+	for i in q["items"].size():
+		if q["items"][i]["deposit"]:
+			o["items"][i]["dep"] = true
+			if not q["items"][i]["common"]:
+				o["items"][i]["task"] = true
+	# mitgegebene Quest-Gegenstände (nicht gewöhnliche): bei Misserfolg / Aufgeben alle Stück zurück (TakeAwayGivenItems)
+	for i in q["given_items"].size():
+		if not q["given_items"][i]["common"]:
+			o["given"][i]["task"] = true
 	if not q["monsters"].is_empty():
 		o["mon"] = q["monsters"].map(_monster)
 	if t.field(q, "m_bClearAcquired"):
@@ -187,6 +212,8 @@ func _quest(t, q: Dictionary, block_counts: Dictionary) -> Dictionary:
 		aw["skill"] = [int(a["skill"]), maxi(1, int(a.get("skill_level", 1)))]
 	if int(a.get("del_skill", 0)) > 0:
 		aw["del_skill"] = int(a["del_skill"])
+	if int(a.get("buff", 0)) > 0:
+		aw["buff"] = [int(a["buff"]), maxi(1, int(a.get("buff_level", 1)))]
 	if not a["items"].is_empty():
 		aw["items"] = a["items"].map(func(g): return {"random": g["random"],
 			"items": g["items"].map(func(it): return {"id": it["id"], "num": it["num"], "prob": snappedf(it["prob"], 0.0001)})})

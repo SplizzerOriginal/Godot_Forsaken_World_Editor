@@ -44,22 +44,37 @@ func _warn(msg: String) -> void:
 
 # cogfx: Einträge aus read_ecm() ({"type", "files", "params", "HookName", ...}).
 # Hängt die GFX unter root (Owner) bzw. die Hooks von sk, liefert die Anzahl.
-func build(root: Node3D, sk: Skeleton3D, hook_bones: Dictionary, cogfx: Array) -> int:
-	var parser = Parser.new()
-	var creator = load(get_script().resource_path.get_base_dir().path_join("../GFX/create_id_200.gd").simplify_path()).new()
+# gfx_scene (FxFilePath -> PackedScene, z.B. attack_fx.gd _scene): GFX als Instanz einer schon gebauten Szene statt
+# jedes Mal neu aus der .gfx (Neubau veralteter Modell-GFX zur Laufzeit, gfx_refresh.gd; je Datei einmal gebaut)
+func build(root: Node3D, sk: Skeleton3D, hook_bones: Dictionary, cogfx: Array, gfx_scene: Callable = Callable()) -> int:
+	var parser = null
+	var creator = null
 	var count = 0
 	for info in cogfx:
 		if int(info["type"]) != EVENT_TYPE_GFX or info["files"].is_empty():
 			continue
 		var rel: String = info["files"][0]
-		var gfx_file = find_gfx(rel)
-		if gfx_file == "":
-			continue # meldet der Importer
-		var skipped = []
-		var node = parser.build_file_node(gfx_file, _node_name(gfx_file.get_file().get_basename()), skipped)
-		for raw_id in skipped:
-			_warn("CoGfx " + gfx_file.get_file() + ": unbekannte Element-ID " + str(raw_id) + " übersprungen")
-		creator.build_elements(node)
+		var node: Node3D
+		var gfx_file: String
+		if gfx_scene.is_valid():
+			var packed = gfx_scene.call(rel.replace("\\", "/")) as PackedScene
+			if packed == null:
+				continue # meldet die Quelle
+			node = packed.instantiate()
+			gfx_file = rel.replace("\\", "/")
+			node.name = _node_name(gfx_file.get_file().get_basename())
+		else:
+			gfx_file = find_gfx(rel)
+			if gfx_file == "":
+				continue # meldet der Importer
+			if parser == null:
+				parser = Parser.new()
+				creator = load(get_script().resource_path.get_base_dir().path_join("../GFX/create_id_200.gd").simplify_path()).new()
+			var skipped = []
+			node = parser.build_file_node(gfx_file, _node_name(gfx_file.get_file().get_basename()), skipped)
+			for raw_id in skipped:
+				_warn("CoGfx " + gfx_file.get_file() + ": unbekannte Element-ID " + str(raw_id) + " übersprungen")
+			creator.build_elements(node)
 		node.transform = tran_matrix(info, node.scale.x * _float(info, "GfxScale", 1.0))
 		node.Play_Speed = _float(info, "GfxSpeed", 1.0)
 		node.Alpha = _float(info, "GfxAlpha", 1.0)
@@ -69,7 +84,8 @@ func build(root: Node3D, sk: Skeleton3D, hook_bones: Dictionary, cogfx: Array) -
 		_link_params(info.get("params", []), node, root, sk, hook_bones, gfx_file.get_file())
 		if int(_float(info, "GfxDelayTime", 0.0)) != 0:
 			_warn("CoGfx " + gfx_file.get_file() + ": GfxDelayTime (verzögertes Folgen) noch nicht umgesetzt")
-	creator.free()
+	if creator != null:
+		creator.free()
 	return count
 
 # FxFilePath (relativ zum gfx-Ordner) -> .gfx der Spieldaten (während des ECM-Imports, gfx_sources.gd)

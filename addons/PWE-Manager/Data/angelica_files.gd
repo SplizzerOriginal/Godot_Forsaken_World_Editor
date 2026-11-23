@@ -17,6 +17,7 @@ extends RefCounted
 # ====================================================
 
 const VFS = preload("angelica_vfs.gd")
+const Store = preload("angelica_store.gd")
 const GBK_TABLE = "gbk_table.bin"
 const GBK_TRAIL_FIRST = 0x40
 const GBK_TRAIL_COUNT = 191 # 0x40 - 0xFE
@@ -29,6 +30,7 @@ var _high = RegEx.create_from_string("[\\x{80}-\\x{ff}]")
 
 func _init(data_root: String = "res://Stock-PWE-Client") -> void:
 	root = data_root.trim_suffix("/")
+	Store.register_root(root) # umgewandelte Spieldaten relativ zu diesem Ordner (P2f3)
 	_gbk = FileAccess.get_file_as_bytes(get_script().resource_path.get_base_dir().path_join(GBK_TABLE))
 
 

@@ -76,34 +76,41 @@ Aufbau
                           "Bot-Test" in der Leiste SERVER
   tests/login_test.gd     Test des Logins im Spielstil (18 Prüfungen), braucht einen Server
   tests/char_test.gd      Test von Figurenauswahl und -erstellung, braucht einen Server
-  tests/world_test.gd     Test der Welt mit NPCs, HUD, Quests, Autoroute, Inventar, Kampf, Fertigkeiten, Shylias Markt und Gegenständen (159 Prüfungen), braucht einen Server und die
+  tests/world_test.gd     Test der Welt mit NPCs, HUD, Quests, Autoroute, Inventar, Kampf, Fertigkeiten, Shylias Markt, Gegenständen, Quest-Popups, Quest-Würfeln mit Ort und GFX, Fertigkeiten ohne Nachladen (186 Prüfungen), braucht einen Server und die
                           importierte s9 (mit dem Map-Import ab Schritt 7, sonst fehlen die Modelle)
   tests/skill_data_test.gd  Test der Fertigkeiten-Daten (9 Prüfungen: Formeln, Effekte, Startfertigkeiten
                           gegen die Spieltexte), ohne Server
   tests/buff_test.gd      Test der Statuseffekte mit eigener Uhr (37 Prüfungen: Brennen, Regeln, Stapel, Werte, Kontrolle,
                           Heilung, Ablauf, Tod, Rassen-Fertigkeiten), ohne Server
-  tests/quest_test.gd     Test der Quest-Regeln mit den echten Quest-Daten (38 Prüfungen: Rassen-Segen, Mit-Quest,
+  tests/quest_test.gd     Test der Quest-Regeln mit den echten Quest-Daten (39 Prüfungen: Rassen-Segen, Mit-Quest,
                           Effekt-Bedingungen, Methode 11, ausgehändigte Gegenstände; Werwolf- und Kindred-Kette;
                           Seelenmünzen und EXP mit Stufenfaktor, Essenz-Geschenke, Tausch, Würfel-Quests), ohne Server
-  tests/item_test.gd      Test der Gegenstände mit echtem Inventar und echten Quests (12 Prüfungen: Fackel-Kette 5694 mit
-                          Sammel-Werkzeugen, Zerstören, Benutzen), ohne Server
-  tests/collision_test.gd Test der Kollision (8 Prüfungen: Gebäude-Hüllen s9 / s11, flache Bodenplatten, Fall-Test der
+  tests/item_test.gd      Test der Gegenstände mit echtem Inventar und echten Quests (27 Prüfungen: Fackel-Kette 5694 mit
+                          Sammel-Werkzeugen, Zerstören, Benutzen; Werwolf-Kette mit echten Effekten und echtem Zaubern:
+                          Grab erst mit dem Blut-Effekt, Effekt-Belohnung, Blut des Werwolfgottes per Rechtsklick, Einziehen
+                          am Ende; der Hänger, Aufgeben und neu Annehmen; "Segen von Eyrda" mit dem Samen (nur an seinem Ort) bis
+                          zum Segen, der Setzling aus genMob;
+                          Gegenstände beim Aufgeben), ohne Server
+  tests/collision_test.gd Test der Kollision (10 Prüfungen: Gebäude-Hüllen s9 / s11, flache Bodenplatten, Fall-Test der
                           Figur auf allen begehbaren Böden über dem Gelände um die Starts der Zwerge, Menschen und Kindred,
                           Spawn-Höhen der Zwergenstadt, Stufen 0,3 / 0,6 / 1,0 m), ohne Server und ohne importierte Map
-  tests/class_test.gd     Startfertigkeiten aller 14 Rasse / Klasse-Kombinationen, Rassen-Segen und Gebet, Stadtportal, Passiv, Schalter und Lernen mit Seelen- / Goldmünzen (203 Prüfungen)
+  tests/class_test.gd     Startfertigkeiten aller 14 Rasse / Klasse-Kombinationen, Rassen-Segen und Gebet, Stadtportal, Passiv, Schalter und Lernen mit Seelen- / Goldmünzen, NPC-Ort vom Server (217 Prüfungen)
                           mit eigenem Server (Maps s9, s10, s11, s31)
   tests/npc_test.gd       Test der NPCs und Monster des Servers (15 Prüfungen), ohne Server:
                           Godot --headless --path Projekt -s res://game/tests/npc_test.gd
-  tests/restart_test.gd   Neustart, Absturz, Wiederverbinden (40 Prüfungen) mit eigenem Server: Neustart
+  tests/restart_test.gd   Neustart, Absturz, Wiederverbinden (43 Prüfungen) mit eigenem Server: Neustart
                           mitten im Kampf (Ort, Leben, Mana, Quest, Inventar bleiben), harter Absturz
                           (Quest bleibt, Ort = zuletzt gespeichert), Verbindung weg / hängt (erzwungene
-                          Anmeldung übernimmt)
+                          Anmeldung übernimmt), 8 s Stillstand wie beim Laden einer Map (bleibt verbunden;
+                          Gegenprobe: Server mit net_timeout 2 trennt)
   tests/reconnect_test.gd Client bei Verbindungsverlust (23 Prüfungen) mit eigenem Server: Server weg
                           mitten in der Welt -> Login mit Meldung, wieder anmelden, Figur an derselben
                           Stelle; zweite Anmeldung desselben Kontos (braucht die importierte s9)
   tests/load_test.gd      Lasttest (16 Prüfungen) mit eigenem Server: 25 Bots (--bots=N) melden sich
                           gleichzeitig an und spielen 60 s (--seconds=N): laufen, kämpfen, Chat
   tests/run_all.gd        alle Tests nacheinander mit Bericht (siehe "Alle Tests")
+  tests/smoke.gd          Rauchtest des exportierten Programms (Rolle --smoke von main.gd: Konto, Figur, Welt s9, NPCs
+                          mit Modell; 6 Prüfungen), braucht einen Server
   tests/test_server.gd, tests/test_util.gd   Hilfen: eigener Test-Server (--dir, Port), Sitzungen
 
 Starten
@@ -277,6 +284,70 @@ In der Welt
   Kanten bis 0,8 m nimmt die Figur beim Laufen hinauf. Monster und Sammelpunkte in Höhlen- und Stadtgebieten stehen auf
   dem begehbaren Boden statt auf dem Gelände darunter (Server mit der Wegekarte, Server/data/<Ordner>/movemaps).
   Bleibt die Autoroute an einem Hindernis hängen, das die Wegekarte nicht kennt, sucht sie außen herum einen neuen Weg.
+  Werwolf-Kette (Bug-Fahrplan B17, Protokoll 23): Fertigkeits-Gegenstände wirken per Rechtsklick ihre Fertigkeit wie ein
+  Zauber (Balken mit dem Namen des Gegenstands) - das Blut des Werwolfgottes gibt so den Effekt der Quest "Werwolfanbetung"
+  und bleibt in der Tasche. Quests, die als Belohnung einen Effekt geben, wirken ihn auf die Figur ("Wunsch der Ahnen"
+  nach dem Gespräch am Grab des Werwolf-Gottes, 20 s). Sammel-Quests
+  nehmen beim Abschluss die Gegenstände wieder weg, die das Original einzieht (z.B. das Blut am Ende der Kette).
+  Quests, die das Erfüllen einer anderen Quest verlangen ("Segen des Wolfs" wartet auf "Lauscht dem Ruf"), verlinken in
+  der Verfolgung das NPC, das diese Quest vergibt (hier das Grab des Werwolf-Gottes nördlich der Ratskammer).
+  Quest aufgeben (Bug-Fahrplan B19, Protokoll 24): Rechtsklick auf eine Quest im Quest-Fenster oder in der Verfolgung
+  öffnet wie im Original ein kleines Menü an der Maus (Aufgeben, Ansehen, Schließen; Verfolgen / Verfolgung abbrechen
+  bleiben gesperrt, weil alle Quests verfolgt werden). Aufgeben fragt erst nach ("Wollt Ihr den ausgewählten Quest
+  wirklich aufgeben?"), auch beim Knopf im Quest-Fenster. Die Quest gilt dann als gescheitert und nimmt ihre Quest-
+  Gegenstände zurück (mitgegebene, gesammelte); manche Quests verschwinden ganz. Quests mit "nach Misserfolg wiederholbar"
+  gibt das NPC danach erneut aus - so kommt man aus "Lauscht dem Ruf" heraus, wenn "Wunsch der Ahnen" ohne das Blut
+  abgelaufen ist (das Original prüft die Effekte dort nur immer wieder, ohne Fehlschlag).
+  Werwolf-Kette (Bug-Fahrplan B20): das Grab des Werwolf-Gottes vergibt "Lauscht dem Ruf" erst, wenn der Effekt des Bluts
+  wirkt (Wunsch des Spielers, im Original vergibt es immer) - also erst das Blut benutzen, dann innerhalb von 20 s ans Grab.
+  Bis dahin zeigt es ein graues "!". Das graue "!" gibt es jetzt allgemein wie im Original: für Quests, die ein NPC
+  zeigt, aber (noch) nicht vergibt; im NPC-Fenster stehen sie grau, wenn die Quest dafür einen Text hat. Quests, die das
+  Erfüllen einer anderen Quest verlangen und ohne NPC abschließen, sind jetzt gleich erfüllt (vorher blieben sie bei 1/1
+  stehen, z.B. "Ausbreitung des Lebens" nach dem Säen in "Segen von Eyrda" oder "Chemische Waffen"; solche Spielstände
+  laufen nach dem Einloggen weiter).
+  Quest-Würfel mit Ort (Bug-Fahrplan B22): Gegenstände wie der Samen in "Segen von Eyrda" oder die Giftige Bombe in "Chemische
+  Waffen" wirken nur an ihrem Ort. Woanders meldet der Rechtsklick wie im Original die Richtung ("Gewünschter Ort ist im
+  Osten.", dazu der ungefähre Abstand) bzw. "nicht auf dieser Karte"; in 50 m Nähe erscheint 10 s lang ein Kristall an der
+  Stelle. Der Server prüft den Ort ebenso. Fertigkeiten, die Monster erzeugen (genMob), tun das jetzt: das Säen lässt einen
+  Setzling an der Figur wachsen, der nach 10 Minuten verschwindet.
+  GFX (Bug-Fahrplan B10, begonnen): Hitzeflimmern ("Warp") wirkt wie im Original - es verschiebt nur das Bild dahinter und
+  zeigt nie seine eigene Textur; Feuer, Feuerball und andere GFX liegen darüber (vorher deckte das Flimmern das Lagerfeuer
+  zu, und der Feuerball wirkte rosa). Die Elemente einer GFX zeichnen in der Reihenfolge ihrer Datei ("Priority" ist im
+  Original eine Detailstufe). Partikel an Modellen wachsen und schrumpfen mit dem Maßstab ihrer GFX (die Blitze um NPCs
+  wie Ullen waren zehnmal zu groß). GFX an Figuren, deren Partikel bzw. Spuren im Original in der Welt bleiben, ziehen jetzt
+  hinter der laufenden Figur her: die Staubspur beim Überfall des Kriegers, der Blitz-Bogen hinter der Klinge beim
+  Blitzschläger. Gebet nach einem Feuerball schießt keinen Feuerball mehr auf die eigene Figur. Beim Stufenaufstieg kommen
+  GFX und Klang des Originals; Sammelpunkte einer laufenden Quest glitzern; Sammeln spielt die Sammel-Aktion (z.B.
+  Bergbau, Pflücken: Anfang, Schleife, Ende; Gegenstände am Boden wie Lagerfeuer, Kürbis oder Heuhaufen nur die Schleife,
+  wie im Original). Gerade Blitze rechnen ihren Ausschlag in Metern der Welt wie das Original (die langen orangen Zacken am
+  Drachen "Sturmschatten" waren der Ausschlag mal GFX-Größe 3 bzw. 10). Bildfolgen mit vertauschtem U / V (UVExchg) zeigen
+  ein Bild der Folge statt Stücke aller Bilder nebeneinander (der "Dreizack" aus vier Blitzen am Schwert beim
+  Blitzschläger ist jetzt ein Blitz längs der Klinge). GFX aus älteren Map-Importen (NPC-Modelle und Karten-Effekte
+  in ECM_Import) baut der Client beim Laden bzw. beim Erscheinen einmal mit dem aktuellen Stand neu - Verbesserungen an
+  den GFX wirken ohne neuen Import (der erspart nur diese Zeit, z.B. ~2,5 s beim Laden von s31). NPC-Modelle, die nicht
+  importiert sind, bekommen jetzt auch ihre angehängten GFX.
+  Schneller laden (Performance-Fahrplan P1): gleiche GFX-Shader teilen sich ein Objekt, der Map-Import legt jeden
+  GFX-Shader einmal als lesbare Datei unter ECM_Import/shaders an, statt ihn in jede Szene einzubetten. s31 mit seinen
+  NPC-Modellen lädt mit Vulkan in ~5,5 statt ~15 s (GL ~3 statt ~7 s); dafür die Maps einmal neu importieren. Mit GL
+  werden die Shader hinter dem Ladebildschirm vorgewärmt (kein Hänger beim ersten Zaubern oder neuen Effekten).
+  Die eigene Figur prüft Gebäude jetzt mit der Kollisionsbox des Originals (0,6 m breit, 1,52 m hoch) statt mit der
+  Modellhöhe: sie läuft unter niedrigen Balken hindurch wie im Original (z.B. die Bude am Wiederbelebungspunkt der
+  Menschen in s9, an der die Autoroute vorher festhing).
+  Der Map-Import speichert die Gebäude-Kollision der Map gleich mit (maps/<map>/<map>_collision.res); beim Betreten lädt
+  der Client sie in ~30 ms, statt sie 2 - 3 s lang aus den Gebäuden zu berechnen (Performance-Fahrplan P2b).
+  Modelle und GFX speichert der Import binär (.scn statt .tscn), sie laden etwa doppelt so schnell (P2c); ältere
+  .tscn-Importe funktionieren weiter. Beim Betreten der Welt schreibt der Client eine Zeile "Welt: Laden ... ms" mit der
+  Dauer jedes Ladeschritts. Bleibt die Autoroute an einer Gebäudewand hängen, die die Wegekarte nicht kennt (z.B. in der Bude
+  am Wiederbelebungspunkt von s9), sucht der Client mit der echten Kollision einen Ausweichschritt und plant von dort neu.
+  Figuren bauen schneller: die große Rassen-ECM wird einmal gelesen und zwischengespeichert (user://cache/ecm), der
+  Map-Import nimmt die Modelle der Sammelpunkte mit, und die Spieldaten laden parallel zur Map (Performance-Fahrplan P2e).
+  Texte der Spiel-Oberfläche kommen aus der übersetzten gameui.stf (vorher nur aus der Skin-Tabelle 2gameui.stf, die
+  in allen Sprachen chinesisch ist - z.B. die Rückfrage beim Aufgeben, "Bis dann." im NPC-Fenster).
+  NPC-Orte für die Autoroute kommen jetzt vom Server (seine Spawn-Daten): die neuere task_npc.data des Clients hat z.B. die
+  Werwolf-NPCs wie Edward Olgen schon in s43 "Land der Entstehung", der Server in s31 - dort steht er auch.
+  Verbindung beim Laden (Bug-Fahrplan B16): Server und Client geben eine Verbindung erst nach 30 s ohne Antwort auf
+  (Server-Einstellung net_timeout; ENet selbst nimmt 5 s, und so lange antwortete der Client beim Laden von s31 nicht -
+  der Werwolf flog im Ladebildschirm hinaus).
   Effekte (wie CECModel::PlayAttackAction): jede Angriffs-Aktion hat in ihrer .ecm Angriffspunkte
   (Ereignis 104, z.B. Schwert 350 ms, Magierstab 750 ms, Dolch zweimal). Dort startet ihre .att
   (gfx\SkillAttack\): Flug-GFX vom Angreifer zum Ziel (der Energieball des Magiers, 30 m/s im
@@ -317,7 +388,11 @@ In der Welt
 
 Dateien des Servers (user://server/ = ~/.local/share/godot/app_userdata/<Projekt>/server/)
   game.db      Spielstände (SQLite, WAL); Sicherung: Server stoppen, game.db* kopieren
-  server.log   Log (alle 60 s eine Zeile "Last", solange Figuren in der Welt sind), status.json
+  server.log   Log (alle 60 s eine Zeile "Last", solange Figuren in der Welt sind); die Logs der letzten 5 Läufe
+               bleiben als server.1.log (voriger Lauf) ... server.5.log. Trennungen im Ladebildschirm stehen dort
+               mit "im Ladebildschirm"; der Client schreibt den Grund ("Client: Verbindung beendet: ...") in
+               user://logs/godot.log (Bug-Fahrplan B16)
+  status.json
                Spieler online und Last je 10 s (Takt-Dauer Ø / max, längstes Bild, Netz kB/s),
                stop -> Server endet sauber (speichert alle Figuren: Ort, Leben, Mana)
   dtls.key / dtls.crt   mit --dtls einmal erzeugt; dtls.key geheim halten, dtls.crt dürfen
@@ -339,7 +414,26 @@ Sicherheit
   - Ohne --dtls ist die Verbindung unverschlüsselt (Passwort lesbar im Netz): nur LAN / localhost.
     Vor dem Betrieb im Internet Server und Clients mit --dtls (bzw. dtls = true) starten.
 
-Export (Projekt -> Exportieren), einmal einrichten:
+Export über die Leiste EXPORT (Plugin, Performance-Fahrplan P2f): "Client Export for Linux" wandelt alle
+  Maps um (jede in einem eigenen Godot-Prozess, mit Speichergrenze; schon aktuelle werden übersprungen), räumt
+  verwaiste Import-Dateien auf (Papierkorb), legt die Vorlage "PWE-Client Linux" an und exportiert nach
+  res://Export/Client-Linux (PWE-Client.x86_64 + PWE-Client.pck). Ohne Editor dasselbe:
+    godot --headless --path <Projekt> -s res://addons/PWE-Manager/Export/export_cli.gd -- [--maps=s9,s31]
+  Dazu (P2f2) die Spielfiguren aller Rassen samt Aktionen, alle Rüstungs-Skins und Waffen und alle GFX der Angriffe,
+  Fertigkeiten und Statuseffekte (Schritte Figuren, Ausrüstung, Effekte; zusammen ~10 min, mehrere GB); dazu (P2f3)
+  Tabellen, Lua, Quests, Konfigurationen und Wegekarten als Ressourcen unter res://ECM_Import/data (Schritt Tabellen,
+  Plugin Data/angelica_store.gd - das VFS liest zuerst dort); dazu (P2f4) die Oberfläche: Bilder, Dialoge (fertig
+  gelesen), Texttabellen, Dialog-Listen je Sprache und die Schriften (Schritt Oberfläche, 4 Teile); dazu (P2f5) die
+  Klänge der Figuren, des Clients und der Oberfläche und die Musik (Schritt Klänge).
+  Seit P2f6 braucht das exportierte Programm die Original-Daten nicht mehr: der Schritt Tabellen schreibt dazu ein
+  Pfadverzeichnis aller Original-Dateien, aus dem das VFS Ordner, Existenz und Größen beantwortet, wenn der
+  Spieldaten-Ordner fehlt. Ohne Server bleibt der Client am Login (Anmelden braucht den laufenden Godot-FW-Server,
+  Leiste SERVER oder exportierter Server). Das exportierte Programm führt kein "-s <Skript>" aus; zum Prüfen die
+  Rolle --smoke:
+    Export/Client-Linux/PWE-Client.x86_64 --headless -- --smoke --port=29000   (Server muss laufen)
+  Getestet (s9 + s31, ohne Stock-PWE-Client neben dem Programm): Rauchtest 6 / 6, Welt s9 in 2,1 s, keine Datei aus den
+  Original-Daten gelesen; Welt-Test ohne Original-Daten im Projekt 183 / 183.
+Export von Hand (Projekt -> Exportieren), einmal einrichten:
   1. Projekteinstellungen (Erweitert): Eintrag "application/run/main_scene.fw_game" hinzufügen,
      Wert res://game/main.tscn. Die normale Hauptszene des Projekts bleibt, wie sie ist.
   2. Vorlage "Linux Client": Plattform Linux, Merkmale -> Eigene: fw_game,

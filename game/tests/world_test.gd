@@ -23,12 +23,28 @@ extends SceneTree
 # Vestry annehmen.
 # Autoroute: Klick auf den Quest-Titel der Verfolgung öffnet Win_QuestMinionDes mit Beschreibung und
 # NPC-Link, "-" klappt ein, der grüne Link "Adam" führt die Figur über die Wegfindung um die Plattform
-# zu Adam, dort geht sein Fenster auf, der Link "Lady Vestry" zurück; NPC in einem anderen Gebiet ->
-# Meldung; Klick auf die Minimap startet eine Autoroute (Ziel-Marke), W bricht sie ab.
+# zu Adam, dort geht sein Fenster auf, der Link "Lady Vestry" zurück; NPC in einem anderen Gebiet (laut Server,
+# quest_where "npc") -> Meldung, ein NPC, den nur die neuere task_npc.data des Clients woanders hat -> Autoroute (B19);
+# Klick auf die Minimap startet eine Autoroute (Ziel-Marke), W bricht sie ab.
+# Quest-Popups (B19): Rechtsklick auf eine Quest im Quest-Fenster (Win_QuestOption) bzw. in der Verfolgung
+# (Win_QuestMinionOption) an der Maus, Aufgeben fragt erst (gameui.stf 236), "Ansehen" wählt die Quest im Quest-Fenster,
+# ein Klick daneben schließt; 5679 (ohne giveup) lehnt der Server ab.
 # Shylias Markt (Z5): Geschenk-Knopf, Reiter, Tausch gegen Essenz, Cocktail per Rechtsklick trinken (Leiste, EXP im Chat).
 # Gegenstände (Bug-Fahrplan B1): Tooltips wie das Original (LuaItemDesc: Rüstung mit Werten, Essenz mit Preis-Symbol und
 # Zusatztext), Zerstören über Btn_Destroy + Klick (Meldungsfenster, OK -> weg, Chat "%d %s zerstört"), die Essenz ist nicht
-# zerstörbar (Hinweis), ein Rechtsklick auf sie bewirkt nichts.
+# zerstörbar (Hinweis), ein Rechtsklick auf sie bewirkt nichts. Fertigkeits-Gegenstand (B17): das Blut des Werwolfgottes
+# (Testbefehl debug_item) zaubert per Rechtsklick (Balken mit seinem Namen), danach liegt Effekt 2886 an, das Blut bleibt;
+# die Verfolgung von 15358 "Segen des Wolfs" (Methode 11) verlinkt das Grab des Werwolf-Gottes, das 15396 vergibt; das Grab
+# zeigt 15396 ohne den Blut-Effekt mit grauem "!" und mit ihm gelb (B20, als Werwolf geprüft). Quest-Würfel mit Ort (B22):
+# die Giftige Bombe außerhalb ihres Orts nennt per Rechtsklick die Richtung, ohne sie zu benutzen; Richtungen an mehreren
+# Stellen, Hinweis-Modell in der Nähe, der Samen (s31) auf s9 "nicht auf dieser Karte".
+# GFX (B10): im Feuerball zeichnet das Warp-Element zuerst, der Kern zuletzt, der Warp zeigt nur das verschobene Bild;
+# der Treffer einer Sofort-Fertigkeit spielt keine gemerkte Aktion einer anderen Fertigkeit ab; das Überfall-GFX bekommt die
+# Lage-Geschichte; das Waffenregal glitzert, solange seine Quest läuft, Sammeln spielt die Aktion der Vorlage (am Boden, Art
+# 0: nur die Schleife); Stufenaufstieg mit GFX und Klang; die Blitzschläger-Klinge tauscht U / V erst nach dem Bild der Folge,
+# der Drachen-Blitz rechnet seinen Ausschlag in Weltmaßen; GFX aus alten Importen baut der Client mit dem aktuellen Code neu
+# (künstlich veraltete Modell-Szene, getauschter Karten-Effekt); GFX-Shader der Map aus gemeinsamen Dateien, gleicher Text =
+# ein Objekt, Vorwärmen nur mit GL (Performance-Fahrplan P1); Gebäude-Kollision aus der beim Import gespeicherten Datei (P2b).
 # Seelenmünzen (Z4): Inventar-Zeile Lab_BindMoney / Txt_BindMoney0..3 sichtbar (Hinweis aus dem XML), Wert aufgeteilt
 # wie das Gold; Chatmeldung bei kill mit bind.
 # Inventar und Ausrüstung (Schritt 10b): B öffnet das Inventar mit der Rüstung (Symbol, Belegung,
@@ -82,6 +98,13 @@ const BOAR = 14563
 const BOAR_LOOT = 14533
 const DAGGER = 15436 # Novizen-Assassinenklinge
 const STAFF = 15452 # Novizen-Magiestab
+const BLOOD = 44134 # Blut des Werwolfgottes (Fertigkeits-Gegenstand, B17)
+const BLOOD_STATE = 2886 # sein Effekt (Fertigkeit 4572)
+const WOLF_BLESSING = 15358 # "Segen des Wolfs" (Methode 11: 15396 erfüllen)
+const WOLF_TOMB = 43385 # Grab des Werwolf-Gottes (vergibt 15396)
+const WOLF_CALL = 15396 # "Lauscht dem Ruf" (B20: erst mit dem Blut-Effekt annehmbar)
+const BOMB = 14548 # Giftige Bombe: Quest-Würfel mit Ort in s9 (B22)
+const SEED = 43953 # Samen: Quest-Würfel mit Ort in s31
 const HOUNDS_AT = Vector3(20.0, 82.0, 84.0)
 const PASSWORD = "geheim-123"
 const LOOK = {"face": 0, "mask": 0, "hair": 1, "skin": 0, "hair_color": 0x902E1E}
@@ -150,6 +173,10 @@ func _run(game: Node) -> void:
 	await _until(func(): return not w.remotes.is_empty(), 5.0)
 	_check("zweiter Spieler erscheint mit Namen", w.remotes.size() == 1 and w.remotes.values()[0].label.text.begins_with("Gast"))
 	await _npcs(w)
+	_gfx_refresh(w)
+	_shader_pool(w)
+	_check("Gebäude-Kollision vorab beim Map-Import gespeichert und geladen (P2b): %s" % str(w.collision_info),
+		str(w.collision_info.get("source", "")).ends_with("(vorab)") and int(w.collision_info.get("hulls", 0)) > 10000 and w._buildings != null)
 	await _skills(w) # schließt das Fenster "Neue Fertigkeiten" (es läge sonst über der Welt)
 	await _hud(w, other)
 	await _quests(w)
@@ -569,24 +596,45 @@ func _quests(w) -> void:
 		qc is RichTextLabel and qc.scroll_active and qc.mouse_filter == Control.MOUSE_FILTER_STOP and qsub != null
 		and qc.position.y + qc.size.y <= qsub.size.y + 0.5)
 	await _shot("9_quests")
+	await _quest_popups(w)
 	_key(KEY_ESCAPE, true)
 	_key(KEY_ESCAPE, false)
 	await _frames(3)
 	_check("Esc schließt das Quest-Fenster", not h.quest_open())
 	await _inventory(w)
 	await _combat(w)
-	# NPC in einem anderen Gebiet
+	# NPC in einem anderen Gebiet: den Ort sagt der Server (quest_where "npc", B19); die task_npc.data des Clients ist neuer und
+	# hat manche NPCs dieser Welt schon woanders (Werwolf-NPCs in s43) - so einer bekommt trotzdem eine Autoroute
 	var far_tid = 0
+	var moved_tid = 0
 	for tid in w.quest_data.npc_pos:
-		if int(w.quest_data.npc_pos[tid][0]) != int(w.info.get("world", 0)):
+		if int(w.quest_data.npc_pos[tid][0]) == int(w.info.get("world", 0)) or (far_tid != 0 and moved_tid != 0):
+			continue
+		var wr = await w.session.quest_where("npc", tid, 0)
+		await create_timer(0.025).timeout # höchstens 40 Anfragen / s: der Server trennt ab 60 / s (Flutbremse, mit den Positionen)
+		var ww = int(wr.get("data", {}).get("world", 0))
+		if wr["code"] == Proto.Code.OK and ww == -1 and far_tid == 0:
 			far_tid = tid
-			break
+		elif wr["code"] == Proto.Code.OK and ww == int(w.info.get("world", 0)) and moved_tid == 0:
+			moved_tid = tid
+	var lines_far = h.chat_lines.size()
 	w.route_npc(far_tid)
-	await _frames(2)
 	var far_name = Hud_plain(str(w.npc_data.info(far_tid)["name"]))
+	await _until(func(): return h.chat_lines.size() > lines_far, 3.0)
 	_check("NPC-Link in ein anderes Gebiet: Meldung (%s)" % far_name, far_tid != 0 and not w.routing()
 		and h.chat_lines.back().contains(far_name))
 	h.chat_lines.pop_back() # keine Fehlermeldung der Quests
+	if moved_tid != 0:
+		var moved_name = Hud_plain(str(w.npc_data.info(moved_tid)["name"]))
+		var lines_moved = h.chat_lines.size()
+		w.route_npc(moved_tid)
+		var moved_routes = await _until_ok(func(): return w.routing(), 5.0)
+		var far_text = Hud_plain(h.texts()["route_far"] % moved_name)
+		_check("NPC %d (%s) laut Client-Daten in Welt %d, laut Server hier: Autoroute statt 'anderes Gebiet' (%s)" % [moved_tid,
+			moved_name, int(w.quest_data.npc_pos[moved_tid][0]), moved_routes], moved_routes
+			and not h.chat_lines.slice(lines_moved).any(func(l): return Hud_plain(l).contains(far_text)))
+		w.cancel_route()
+		await _frames(3)
 	# Klick auf die Minimap: rechts / links / unten / oben der Mitte, der erste begehbare Punkt (Karte
 	# gespiegelt: rechts = Welt -x)
 	var area: Control = h._radar_marks
@@ -710,14 +758,29 @@ func _inventory(w) -> void:
 	_check("quest_where nannte dieses Waffenregal (%.1f m daneben)" % (Vector3(rp[0], rp[1], rp[2]).distance_to(rack.global_position) if rack != null else -1.0),
 		rack != null and Vector3(rp[0], rp[1], rp[2]).distance_to(rack.global_position) < 1.0)
 	await _shot("12_rack")
+	var rinfo: Dictionary = w.npc_data.info(RACK)
+	var glow_before = rack.get_node_or_null("Quest_Glitzer") != null
 	w.select_target(rack.id)
 	await _until(func(): return h.progress_shown(), 10.0)
 	_check("Klick auf das Regal: Sammeln mit Fortschrittsbalken (%s)" % h.dlg(h.PROGRESS).get_text("Txt_info"), h.progress_shown())
+	# B10: Quest-Sammelpunkt glitzert (task_in läuft), Sammel-Aktion der Vorlage (Start / Schleife in der Waffen-Variante)
+	var acts: Array = w.gathering.get("acts", [])
+	var cur = str(w.player.anim.current_animation) if w.player.anim != null else ""
+	_check("Waffenregal (task_in %d) glitzert vor dem Sammeln (%s); Sammel-Aktion %s (Art %d '%s'), läuft '%s'" % [int(rinfo.get("task", 0)),
+		glow_before, str(acts), int(rinfo.get("act_type", 0)), str(rinfo.get("action", "")), cur], glow_before
+		and (acts.is_empty() if w.gather_acts(rinfo).is_empty() else (cur == acts[0] or cur == acts[1])))
+	# Sammeln am Boden (Art 0, z.B. Lagerfeuer 14554, Kürbis 21072): nur die Schleife <action>_<Waffe> wie PlayVocationAction
+	var fire_acts = w.gather_acts(w.npc_data.info(14554))
+	var pump_acts = w.gather_acts(w.npc_data.info(21072))
+	_check("Sammeln am Boden (Art 0, nur Schleife): Lagerfeuer %s, Kürbis %s" % [str(fire_acts), str(pump_acts)],
+		fire_acts.size() == 3 and fire_acts[0] == "" and fire_acts[2] == "" and str(fire_acts[1]).begins_with("开锁循环")
+		and pump_acts.size() == 3 and pump_acts[0] == "" and pump_acts[2] == "" and str(pump_acts[1]).begins_with("采摘循环"))
 	await _shot("13_gather")
 	await _until(func(): return bag_pos.call(SWORD) >= 0 and not h.progress_shown(), 10.0)
 	await _until(func(): return w.quest_data.is_active(7997), 3.0)
 	_check("Schwert in der Tasche (Chat), 8366 erfüllt, weiter mit 7997", bag_pos.call(SWORD) >= 0 and w.quest_data.is_active(7997)
 		and h.chat_lines.any(func(l): return l.contains(sword_name)))
+	_check("nach dem Sammeln kein Glitzer mehr am Waffenregal", not is_instance_valid(rack) or rack.get_node_or_null("Quest_Glitzer") == null)
 	# Ziehen auf den Waffenplatz
 	_key(KEY_B, true)
 	_key(KEY_B, false)
@@ -750,6 +813,9 @@ func _inventory(w) -> void:
 	await _until(func(): return h.npc_open(), 40.0)
 	var done = await _talk_through(w, 7997, 0)
 	await _until(func(): return int(h.stats.get("level", 1)) == 3, 3.0)
+	await _frames(2)
+	_check("Stufenaufstieg (B10): Klang 升级音效 spielt (%s), GFX 角色升级 am Modell" % str(w.get_node_or_null("Stufenaufstieg") != null),
+		w.get_node_or_null("Stufenaufstieg") != null and w.player.model.find_children("*", "Node3D", false, false).any(func(c): return c.has_method("player_length_ms")))
 	_check("5679 bei Johnny abgeschlossen: Stufe 3 (40 * 5 EXP)", done and int(h.stats.get("level", 1)) == 3
 		and w.quest_data.task(5679) != {} and not w.quest_data.is_active(5679))
 
@@ -927,6 +993,89 @@ func _skin(model: Node3D, slot: String):
 			return c.mesh
 	return null
 
+# Popups der Quests (B19): Rechtsklick auf 5679 im Quest-Fenster -> Win_QuestOption an der Maus (Verfolgen gesperrt),
+# Aufgeben fragt (gameui.stf 236), Abbrechen lässt die Quest; Rechtsklick auf ihre Zeile in der Verfolgung ->
+# Win_QuestMinionOption, "Ansehen" wählt sie im Quest-Fenster; Aufgeben mit OK -> der Server lehnt ab (5679 ohne giveup),
+# Meldung im Chat, die Quest läuft weiter; ein Klick daneben schließt ein Popup
+func _quest_popups(w) -> void:
+	var h = w.hud
+	var tree = h.dlg("Quest").item("Tv_Quest") as Tree
+	var item: TreeItem = null
+	for it in tree.get_root().get_children():
+		if int(it.get_metadata(0)) == 5679:
+			item = it
+	var ev = InputEventMouseButton.new()
+	ev.button_index = MOUSE_BUTTON_RIGHT
+	ev.pressed = true
+	ev.position = tree.get_item_area_rect(item).get_center() if item != null else Vector2.ZERO
+	ev.global_position = tree.get_global_transform() * ev.position
+	tree.gui_input.emit(ev)
+	await _frames(2)
+	var pop = h.dlg(h.QUEST_OPTION)
+	_check("Rechtsklick im Quest-Fenster: Win_QuestOption für 5679 (%s, %d), Verfolgen gesperrt" % [h.quest_option_open(),
+		h.option_quest], item != null and h.quest_option_open() == h.QUEST_OPTION and h.option_quest == 5679
+		and pop.item("Btn_Focus").disabled and not pop.item("Btn_Abandon").disabled
+		and pop.get_global_rect().has_point(ev.global_position + Vector2(1, 1)))
+	await _shot("9a_quest_option")
+	pop.send("Btn_Abandon")
+	await _until(func(): return h.aui.has_message_box(), 3.0)
+	var box = h.aui._top.get_child(h.aui._top.get_child_count() - 1) if h.aui.has_message_box() else null
+	var ask = Hud_plain(box.get_text("Txt_Message")) if box != null else ""
+	if box != null:
+		box.send("IDCANCEL")
+	await _frames(10)
+	_check("Aufgeben fragt '%s' (gameui.stf 236, übersetzt), Abbrechen: 5679 läuft weiter, Popup zu" % ask,
+		ask == Hud_plain(h.aui.text(h.STF_ABANDON_ASK)) and ask != "" and not h._has_cjk(ask) and w.quest_data.is_active(5679)
+		and h.quest_option_open() == "")
+	h.close_quests()
+	await _frames(2)
+	var line = h._trace_line_quest.find(5679)
+	var y = h._trace_label.get_paragraph_offset(line) + 3.0 if line >= 0 else -1.0
+	var rc = InputEventMouseButton.new()
+	rc.button_index = MOUSE_BUTTON_RIGHT
+	rc.pressed = true
+	rc.position = Vector2(20, y)
+	rc.global_position = h._trace_label.get_global_transform() * rc.position
+	h._trace_label.gui_input.emit(rc)
+	await _frames(2)
+	var mpop = h.dlg(h.QUEST_MINION_OPTION)
+	_check("Rechtsklick in der Verfolgung (Zeile %d): Win_QuestMinionOption für 5679 (%s, %d), Verfolgung abbrechen gesperrt" % [
+		line, h.quest_option_open(), h.option_quest], line >= 0 and h.quest_option_open() == h.QUEST_MINION_OPTION
+		and h.option_quest == 5679 and mpop.item("Btn_Delete").disabled)
+	await _shot("9b_trace_option")
+	mpop.send("Btn_Info")
+	await _frames(3)
+	_check("'Ansehen' öffnet das Quest-Fenster mit 5679 (%d)" % h.quest_selected, h.quest_open() and h.quest_selected == 5679
+		and h.quest_option_open() == "")
+	h._trace_label.gui_input.emit(rc)
+	await _frames(2)
+	var outside = InputEventMouseButton.new()
+	outside.button_index = MOUSE_BUTTON_LEFT
+	outside.pressed = true
+	outside.position = Vector2(2, 2)
+	outside.global_position = Vector2(2, 2)
+	var was_open = h.quest_option_open()
+	h._input(outside)
+	await _frames(2)
+	_check("Klick neben das Popup schließt es (%s -> '%s')" % [was_open, h.quest_option_open()], was_open == h.QUEST_MINION_OPTION
+		and h.quest_option_open() == "")
+	h._trace_label.gui_input.emit(rc)
+	await _frames(2)
+	var lines = h.chat_lines.size()
+	mpop.send("Btn_Abandon")
+	await _until(func(): return h.aui.has_message_box(), 3.0)
+	box = h.aui._top.get_child(h.aui._top.get_child_count() - 1) if h.aui.has_message_box() else null
+	var asked = box != null
+	if asked:
+		box.send("IDOK") # danach freigegeben
+	await _until(func(): return h.chat_lines.size() > lines, 3.0)
+	var said = h.chat_lines.slice(lines).map(func(l): return Hud_plain(l))
+	_check("Aufgeben mit OK bei 5679 (ohne giveup): Server lehnt ab %s, 5679 läuft weiter" % str(said), asked
+		and said.any(func(l): return l.contains(Proto.text(Proto.Code.QUEST_NO_GIVEUP, w.login.language)))
+		and w.quest_data.is_active(5679))
+	while h.chat_lines.size() > lines: # erwartete Ablehnung, keine Fehlermeldung der Quests
+		h.chat_lines.pop_back()
+
 func _right_click(c: Control) -> void:
 	if c == null:
 		return
@@ -1012,6 +1161,156 @@ func _mage_projectile(w) -> void:
 		hit_at[0] - t0], pts.size() == 1 and str(pts[0][1]).ends_with("法系普攻3.att") and flew and fly_ms >= 600
 		and hit_at[0] - t0 > fly_ms and w.attack_fx.importer.written.is_empty())
 	holder.queue_free()
+	_gfx_order(w)
+
+# GFX-Reihenfolge und Warp (B10): im Feuerball 飞火球 zeichnet das Warp-Element (云团03, Warp 1) zuerst, die übrigen in der
+# Reihenfolge der Datei - der Kern (101 火球, letztes Element, Priority 0) zuletzt statt unter den Wolken; der Warp-Shader zeigt
+# nur das verschobene Bild (Formel des Originals, ohne Mip-Wahl), nie die Farbe der Textur; Partikel-Größe mit dem GFX-Maßstab
+# Alte Importe (B10 Teil 4): beim Laden neu gebaute Modelle / Karten-Effekte zählen, Warteschlange leer; dazu der Weg selbst
+# an einer künstlich veralteten Modell-Szene (Stempel entfernt: CoGfx neu, Stempel aktuell) und einem getauschten Karten-Effekt
+func _gfx_refresh(w) -> void:
+	var R = w._gfx_refresh
+	if R == null:
+		_check("gfx_refresh.gd fehlt", false)
+		return
+	var model_ok = false
+	var info = "kein Modell mit CoGfx"
+	var have_orig = DirAccess.dir_exists_absolute(w.attack_fx.importer.data_root) # ohne Original-Daten (P2f6) gibt es keine .ecm
+	for path in (w._scenes if have_orig else {}):
+		var sc: PackedScene = w._scenes[path]
+		if sc == null or w._stale.has(path):
+			continue
+		var ecm: Dictionary = w.attack_fx.importer.read_ecm(str(R._root_meta(sc, "ecm_path", "")))
+		if ecm.get("cogfx", []).filter(func(e): return int(e.get("type", 0)) == 100).is_empty():
+			continue
+		var inst = sc.instantiate()
+		inst.remove_meta(R.STAMP_META)
+		var stale = PackedScene.new()
+		stale.pack(inst)
+		inst.free()
+		var r: Dictionary = R.refresh_model(w.attack_fx.importer, stale, w.attack_fx._scene)
+		info = "%s: veraltet %s -> %s, GFX %d neu / %d alt" % [str(path).get_file(), R.outdated(stale), R.outdated(r["scene"]), r["gfx"], r["removed"]]
+		model_ok = R.outdated(stale) and not R.outdated(r["scene"]) and r["gfx"] > 0 and r["gfx"] == r["removed"]
+		break
+	var swap_ok = false
+	var swap_info = "kein Karten-Effekt"
+	for n in w.map_root.find_children("*", "Node3D", true, false):
+		var p: String = n.scene_file_path
+		if p == "" or n.owner != w.map_root or R.gfx_path(p) == "" or not n.has_meta("valid_time"):
+			continue
+		var parent = n.get_parent()
+		var nm = n.name
+		var xf: Transform3D = n.transform
+		var vt = n.get_meta("valid_time")
+		var old_id = n.get_instance_id()
+		w._map_gfx[p] = [n]
+		w._refresh_map_gfx(p)
+		var neu = parent.get_node_or_null(NodePath(nm))
+		swap_info = "%s: getauscht %s, Lage gleich %s, Tageszeit %s" % [nm, neu != null and neu.get_instance_id() != old_id,
+			neu != null and neu.transform.is_equal_approx(xf), str(neu.get_meta("valid_time", "-")) if neu != null else "-"]
+		swap_ok = neu != null and neu.get_instance_id() != old_id and neu.transform.is_equal_approx(xf) and neu.get_meta("valid_time", -1) == vt \
+			and not R.outdated(w.attack_fx._scene(R.gfx_path(p)))
+		break
+	if swap_info == "kein Karten-Effekt" and w.refreshed_gfx > 0:
+		# alter Import: der Client hat schon alle Karten-Effekte getauscht -> einer davon trägt den aktuellen Stand und die Tageszeit
+		for n in w.map_root.find_children("*", "Node3D", true, false):
+			if n.has_meta("valid_time") and R.is_gfx(n) and n.scene_file_path == "" and str(n.get_meta(R.STAMP_META, "")) == R.stamp():
+				swap_info = "%s schon beim Laden getauscht (aktueller Stand, Tageszeit %s)" % [n.name, str(n.get_meta("valid_time"))]
+				swap_ok = true
+				break
+	if not model_ok and info == "kein Modell mit CoGfx" and not have_orig:
+		# ohne Original-Daten (P2f6) gibt es keine .ecm, aus der ein veraltetes Modell neu gebaut würde - und keine alten Importe
+		info = "ohne Original-Daten nicht prüfbar"
+		model_ok = true
+	_check("Alte Importe: beim Laden neu gebaut %d Modelle / %d Karten-Effekte, Warteschlange leer (%d); %s; %s" % [w.refreshed_models,
+		w.refreshed_gfx, w._gfx_queue.size(), info, swap_info], w._gfx_queue.is_empty() and model_ok and swap_ok)
+
+# Performance-Fahrplan P1: GFX-Materialien der Map verweisen auf gemeinsame Shader-Dateien (ECM_Import/shaders), gleicher
+# Text = dasselbe Shader-Objekt über alle Szenen; Vorwärmen hinter dem Ladebildschirm nur mit GL
+func _shader_pool(w) -> void:
+	var by_code = {}
+	var files = 0
+	var total = 0
+	var split = 0
+	for gi in w.map_root.find_children("*", "GeometryInstance3D", true, false):
+		var m = gi.material_override as ShaderMaterial
+		if m == null or m.shader == null or not R_is_gfx_material(gi):
+			continue
+		total += 1
+		if m.shader.resource_path.begins_with("res://ECM_Import/shaders/"):
+			files += 1
+		var c: String = m.shader.code
+		if by_code.has(c) and by_code[c] != m.shader:
+			split += 1
+		by_code[c] = m.shader
+	var gl = RenderingServer.get_current_rendering_method() == "gl_compatibility"
+	_check("Shader-Vorrat (P1): %d GFX-Materialien der Map, %d mit Shader-Datei, %d Texte, doppelte Objekte %d, Vorrat %d; vorgewärmt %d (GL %s)" % [
+		total, files, by_code.size(), split, w._gfx_parser.shader_pool_size(), w.prewarmed, gl],
+		total > 0 and split == 0 and (files == total or w.refreshed_gfx > 0) and ((w.prewarmed > 0) == gl))
+
+static func R_is_gfx_material(gi: Node) -> bool:
+	var el = gi.get_parent()
+	return el != null and typeof(el.get("parsed_data")) == TYPE_DICTIONARY
+
+func _gfx_order(w) -> void:
+	var sc: PackedScene = w.attack_fx._scene("人物/飞行/飞火球.gfx")
+	var n = sc.instantiate() if sc != null else null
+	var prio = {}
+	var warp_code = ""
+	var core = -999
+	var warp_prio = 999
+	var scaled = false
+	if n != null:
+		for mi in n.find_children("*", "GeometryInstance3D", true, false):
+			var m = mi.material_override as ShaderMaterial
+			var el = mi.get_parent()
+			if m == null or m.shader == null or el == null:
+				continue
+			var d = el.get("parsed_data")
+			var warp = typeof(d) == TYPE_DICTIONARY and str(d.get("Warp", "0")).strip_edges() == "1"
+			prio[str(el.name)] = m.render_priority
+			if warp:
+				warp_prio = m.render_priority
+				warp_code = m.shader.code
+			if str(el.name).ends_with("_ID_101"):
+				core = m.render_priority
+			if "g_scale" in m.shader.code:
+				scaled = true
+		n.free()
+	var others = prio.values().filter(func(v): return v != warp_prio)
+	# Lage-Geschichte (B10): das Überfall-GFX 加速 am Rücken bekommt sie für seine ungebundenen Partikel
+	var wind = w.attack_fx.attach(w.player, w.player.model, "策划联入/加速.gfx", "HH_Spine")
+	var drivers = wind.find_children("Lage_Geschichte", "", true, false).size() if wind != null else 0
+	if wind != null:
+		wind.queue_free()
+	_check("Überfall-GFX 加速 an der Figur: %d ungebundene Partikel-Netze mit Lage-Geschichte" % drivers, drivers >= 3)
+	_check("Feuerball: Warp zeichnet zuerst (%d), Kern 101 zuletzt (%d von %s), Warp zeigt nur das verschobene Bild, Partikel mit GFX-Maßstab (%s)" % [
+		warp_prio, core, str(prio.values()), scaled], sc != null and warp_prio == Material.RENDER_PRIORITY_MIN and not others.is_empty()
+		and core == others.max() and "textureLod(screen_texture" in warp_code and not "normal_map" in warp_code and scaled)
+	# Blitzschläger-Klinge 闪电剑刀效果 (Decal 100, 闪电.dds 1 x 4 mit UVExchg): Tausch erst nach dem Bild der Folge, sonst vier
+	# Blitze nebeneinander ("Dreizack"); Drachen-Blitz 黑龙王BOOS闪电连接 (gerade, Endpunkte an Haken): Ausschlag in Weltmaßen
+	var uv_ok = false
+	var blade: PackedScene = w.attack_fx._scene("人物/技能/战士/闪电剑刀效果.gfx")
+	if blade != null:
+		var bn = blade.instantiate()
+		for mi in bn.find_children("*", "GeometryInstance3D", true, false):
+			var m = mi.material_override as ShaderMaterial
+			if m != null and m.shader != null and str(mi.get_parent().name).begins_with("Element_1_0_ID_100"):
+				var c: String = m.shader.code
+				uv_ok = c.find("frame_y / f_rows") > 0 and c.find("final_uv = final_uv.yx") > c.find("frame_y / f_rows")
+		bn.free()
+	var amp_ok = false
+	var ltn: PackedScene = w.attack_fx._scene("怪物/怪物身上效果/黑龙王BOOS闪电连接.gfx")
+	if ltn != null:
+		var ln = ltn.instantiate()
+		for mi in ln.find_children("Lightning_GFX", "GeometryInstance3D", true, false):
+			var m = mi.material_override as ShaderMaterial
+			amp_ok = m != null and m.shader != null and "amp /= w_scale;" in m.shader.code
+		ln.free()
+	elif not DirAccess.dir_exists_absolute(w.attack_fx.importer.data_root):
+		amp_ok = true # ohne Original-Daten (P2f6) nur, wenn die Map des Drachen mit umgewandelt ist
+	_check("Blitzschläger-Klinge: UV-Tausch nach dem Bild der Folge (%s); Drachen-Blitz mit Ausschlag in Weltmaßen (%s)" % [uv_ok, amp_ok],
+		uv_ok and amp_ok)
 
 # Fertigkeit einsetzen (Fertigkeiten-Fahrplan F2): Taste 2 (Hieb, Leiste unten Platz 2) ohne Ziel -> Meldung;
 # auf ein Wildschwein: hinlaufen, zaubern (Aktion 战士_斩击, Zauberbalken mit dem Namen), Treffer mit Zahl,
@@ -1074,6 +1373,16 @@ func _skill_cast(w) -> void:
 	await _until(func(): return h.cool_fraction(122) == 0.0, 5.0)
 	await _frames(2)
 	_check("nach 3 s ist Hieb wieder bereit (Uhr weg)", h.cool_fraction(122) == 0.0 and cool != null and cool._left <= 0.0)
+	# B26: die Aktion einer Fertigkeit läuft einmal (nachgeladene Aktionen der umgewandelten Figur liefen als Schleife weiter)
+	var slash = w.player.anim.get_animation("战士_斩击") if w.player.anim.has_animation("战士_斩击") else null
+	_check("Hieb-Aktion lief einmal (Schleife %s, jetzt '%s')" % [str(slash.loop_mode) if slash != null else "-",
+		w.player.anim.current_animation], slash != null and slash.loop_mode == Animation.LOOP_NONE
+		and w.player.anim.current_animation != "战士_斩击")
+	# P3: GFX und Klänge der Fertigkeit lagen schon beim Betreten im Speicher (sonst ruckelt das erste Zaubern)
+	var hieb_files = _action_files(w, "战士_斩击")
+	var hieb_late = _late_loads(w, hieb_files)
+	_check("Hieb ohne Nachladen: %d GFX / Klänge der Aktion vorab geladen, beim Zaubern nachgeladen %s" % [hieb_files.size(),
+		str(hieb_late)], not hieb_files.is_empty() and hieb_late.is_empty())
 	w.stop_attack()
 	w.select_target(0)
 	# Statuseffekte (F3) im Client: Meldungen buffs, hit mit buff (nur Zahl, sofort), heal (grüne Zahl)
@@ -1399,6 +1708,7 @@ func _gone_or_dead(ref: WeakRef) -> bool:
 	return n == null or n.dead
 
 func _prayer(w) -> void:
+	await _stale_cast_hit(w)
 	var h = w.hud
 	var r = await w.session.debug_skill(1958, 1)
 	await _until(func(): return w.skill_info.has("1958") and h.skill_state["skills"].has(1958), 3.0)
@@ -1433,12 +1743,51 @@ func _prayer(w) -> void:
 			break
 		w.cancel_route()
 		await _frames(2)
+	# erst zaubern, wenn die Figur sicher unterwegs ist (3 m oder hinter dem 2. Wegpunkt) - früher blieb sie am Wiederbelebungspunkt
+	# von s9 unter dem Balken einer Bude hängen (Kollision höher als im Original, B2; behoben 22.11.)
+	# und nur, wenn sie gerade wirklich läuft: an der Seitenwand derselben Bude stand sie schon bei Wegpunkt 2 still (23.11., die
+	# Wegekarte kennt die dünne Wand nicht) - der Ausweichschritt kommt erst nach ROUTE_STUCK_TIME (1,2 s), darum bis 6 s warten
+	var go_from = p.global_position
+	var t_go = Time.get_ticks_msec() + 6000
+	var recent: Array = []
+	while Time.get_ticks_msec() < t_go:
+		await process_frame
+		recent.append(p.global_position)
+		if recent.size() > 10:
+			recent.pop_front()
+		if not p.following():
+			break
+		var moving = recent.size() >= 10 and Vector2(recent[-1].x - recent[0].x, recent[-1].z - recent[0].z).length() > 0.3
+		if moving and (p.path_index >= 2 or Vector2(p.global_position.x - go_from.x, p.global_position.z - go_from.z).length() >= 3.0):
+			break
 	var from = p.global_position
 	w.use_skill(1958)
 	await _frames(3)
 	var bar = h.progress_shown()
 	var act = str(p.anim.current_animation) if p.anim != null else "-"
-	await create_timer(0.6).timeout
+	# 0,6 s beobachten: Sprünge (pos_correct des Servers), Stillstand (Diagnose für den alten Wackler)
+	var t_end = Time.get_ticks_msec() + 600
+	var last_pos = p.global_position
+	var jump = 0.0
+	var still_frames = 0
+	var frames_n = 0
+	while Time.get_ticks_msec() < t_end:
+		await process_frame
+		var step = Vector2(p.global_position.x - last_pos.x, p.global_position.z - last_pos.z).length()
+		jump = maxf(jump, step)
+		if step < 0.001:
+			still_frames += 1
+		frames_n += 1
+		last_pos = p.global_position
+	var hits = []
+	for k in p.get_slide_collision_count():
+		var col = p.get_slide_collision(k).get_collider()
+		var nm = (str(col.name) + " (" + col.get_class() + ")") if col != null else "-"
+		if not nm in hits:
+			hits.append(nm)
+	var diag = "Zustand %s, Tempo %.2f, verwurzelt %s, Weg %s (Punkt %d / %d), Ziel %s, Zaubern %s, Einmal '%s', größter Schritt %.2f m, still %d von %d Bildern, stößt an %s, bei %s" % [
+		str(p.state), Vector2(p.velocity.x, p.velocity.z).length(), str(p.rooted), str(p.following()), int(p.path_index), p.path.size(),
+		str(p.target != null), str(w.casting.keys()), str(p._once), jump, still_frames, frames_n, str(hits), str(p.global_position.snapped(Vector3.ONE * 0.1))]
 	var moved = Vector2(p.global_position.x - from.x, p.global_position.z - from.z).length()
 	var still_target = w.routing()
 	var mine = w.buffs.get(w.my_id, []).filter(func(x): return int(x[0]) == 1113)
@@ -1446,10 +1795,17 @@ func _prayer(w) -> void:
 	var mp = int(h.stats.get("mp", 0))
 	var max_mp = int(h.stats.get("max_mp", 1))
 	w.cancel_route()
-	_check("Gebet im Laufen (Autoroute, %.0f m; %s): %s, Zauberbalken %s, Aktion '%s', weitergelaufen %.1f m (Route bleibt %s), Effekt 1113 %s, GFX 16 %s, Mana 0 -> %d / %d" % [
-		far, " / ".join(tries), Proto.text(r["code"]), str(bar), act, moved, str(still_target), str(not mine.is_empty()), str(gfx), mp, max_mp],
+	_check("Gebet im Laufen (Autoroute, %.0f m; %s): %s, Zauberbalken %s, Aktion '%s', weitergelaufen %.1f m (Route bleibt %s), Effekt 1113 %s, GFX 16 %s, Mana 0 -> %d / %d%s" % [
+		far, " / ".join(tries), Proto.text(r["code"]), str(bar), act, moved, str(still_target), str(not mine.is_empty()), str(gfx), mp, max_mp,
+		(" (Ausweichschritte %d)" % w.escapes) if moved > 1.0 else " [" + diag + ", Ausweichschritte %d, Wandsperren %d]" % [w.escapes, w.blocked_contacts]],
 		r["code"] == Proto.Code.OK and not bar and not act.begins_with("祈祷") and moved > 1.0 and still_target and not mine.is_empty() and gfx
 		and mp >= int(max_mp * 0.25))
+	# P3: das GFX des Statuseffekts (16) lag schon beim Betreten im Speicher
+	var c: Dictionary = w.info["char"]
+	var g16: Array = w.buff_data.gfx(int(c["race"]), int(c["class"]), 16) if w.buff_data != null else []
+	var g16_late = _late_loads(w, [str(g16[0])] if not g16.is_empty() else [])
+	_check("Gebet ohne Nachladen: GFX des Statuseffekts %s vorab geladen (nachgeladen %s)" % [str(g16[0]).get_file() if not g16.is_empty() else "-",
+		str(g16_late)], not g16.is_empty() and w.attack_fx._gfx.has(str(g16[0])) and g16_late.is_empty())
 	await _shot("24_prayer")
 
 # Z5: Geschenk-Knopf öffnet Shylias Markt auf "Erhalten"; Reiter mit den Texten des Spiels; "Gratis EXP": Orangener Cocktail
@@ -1561,6 +1917,117 @@ func _items(w) -> void:
 	_check("Btn_Destroy (Modus %s) + Klick: Frage '%s', OK -> Cocktail weg, Chat %s, Modus aus" % [mode, text, str(said)], cpos >= 0
 		and mode and text.contains(cname) and not h.destroy_mode and pos_of.call(9056) < 0
 		and said.any(func(l): return l.contains(cname)))
+	# Fertigkeits-Gegenstand (B17): Blut des Werwolfgottes per Rechtsklick wirkt 4572 (Zauberbalken mit dem Namen), dann
+	# Effekt 2886 an der eigenen Figur, das Blut bleibt (permenent)
+	var grey_icon = _tomb_icon(w)
+	var gave = await ls.session.debug_item(BLOOD, 1)
+	await _until(func(): return pos_of.call(BLOOD) >= 0, 5.0)
+	var bpos = pos_of.call(BLOOD)
+	var bname = Hud_plain(w.item_data.info(BLOOD)["name"])
+	_right_click(h._slot_control("bag", bpos))
+	await _until(func(): return w.casting.has("end"), 3.0)
+	var bar = str(w.casting.get("name", ""))
+	var has_state = func(): return w.buffs.get(w.my_id, []).any(func(b): return int(b[0]) == BLOOD_STATE)
+	await _until(func(): return w.casting.is_empty() and has_state.call(), 5.0)
+	_check("Blut des Werwolfgottes (%s, Platz %d): Rechtsklick zaubert '%s', danach Effekt %d, Blut bleibt" % [
+		Proto.text(gave["code"]), bpos, bar, BLOOD_STATE], gave["code"] == Proto.Code.OK and w.item_data.info(BLOOD).get("use", false)
+		and bar == bname and has_state.call() and pos_of.call(BLOOD) == bpos)
+	# B20: das Grab zeigt "Lauscht dem Ruf" grau, bis der Blut-Effekt da ist (need_buffs), dann gelb (wie CECNPCServer)
+	var qd = w.quest_data
+	var topic = qd.topic(qd.task(WOLF_CALL))
+	var yellow_icon = _tomb_icon(w)
+	_check("Grab des Werwolf-Gottes (Werwolf, 15358 läuft): ohne Blut-Effekt '%s' (graues !), mit '%s' (gelbes !)" % [grey_icon,
+		yellow_icon], grey_icon != "" and grey_icon == str(qd.icons.get([qd.QBT_CAN_NOT_GET, topic], "-"))
+		and yellow_icon == str(qd.icons.get([qd.QBT_CAN_GET, topic], "-")))
+	await _dice_place(w, ls, pos_of)
+	# Verfolgung einer "Quest erfüllen"-Quest (Methode 11): 15358 "Segen des Wolfs" verlinkt das Grab des Werwolf-Gottes
+	# (vergibt 15396 "Lauscht dem Ruf"), solange 15396 nicht läuft
+	var parts = w.quest_data.goal_parts(w.quest_data.task(WOLF_BLESSING))
+	_check("15358 'Segen des Wolfs': Ziel %s führt zum Grab des Werwolf-Gottes (npc:%d)" % [str(parts), WOLF_TOMB],
+		parts.size() == 1 and parts[0]["link"] == "npc:%d" % WOLF_TOMB and str(parts[0]["text"]).ends_with("0/1"))
+
+# Quest-Würfel mit Ort (B22): die Giftige Bombe 14548 gilt nur in s9 in der Box um (80 | 83 | 103), halbe Kanten 10. Außerhalb
+# nennt der Client per Rechtsklick die Richtung (DEST_* der Spieldaten, dazu der Abstand) und schickt nichts; die Richtung an
+# einigen Stellen (Figur dafür kurz versetzt, ohne Bild dazwischen); in 50 m Nähe das Hinweis-Modell an der Mitte; der Samen
+# 43953 (s31) meldet auf s9 "nicht auf dieser Karte"
+func _dice_place(w, ls, pos_of: Callable) -> void:
+	var h = w.hud
+	var gave = await ls.session.debug_item(BOMB, 1)
+	await _until(func(): return pos_of.call(BOMB) >= 0, 5.0)
+	var bpos = pos_of.call(BOMB)
+	var before = h.chat_lines.size()
+	_right_click(h._slot_control("bag", bpos))
+	await _frames(10)
+	var said = h.chat_lines.slice(before).map(func(l): return Hud_plain(l))
+	var dest = func(key): return str(h.game_text(key))
+	var real_text = w.dice_place_text(w.item_data.info(BOMB))
+	_check("Giftige Bombe (%s) per Rechtsklick außerhalb ihres Orts: Chat %s, kein Benutzen (%s), Bombe bleibt" % [
+		Proto.text(gave["code"]), str(said), w.using.is_empty()], gave["code"] == Proto.Code.OK and real_text != ""
+		and said.any(func(l): return l.contains(real_text.left(12))) and w.using.is_empty() and pos_of.call(BOMB) == bpos
+		and not real_text.unicode_at(0) >= 0x3000)
+	var info = w.item_data.info(BOMB)
+	var keep: Vector3 = w.player.global_position
+	var at = func(v: Vector3) -> String:
+		w.player.global_position = v
+		var t = w.dice_place_text(info)
+		w.player.global_position = keep
+		return t
+	var north = at.call(Vector3(80, 83, 60))
+	var ne = at.call(Vector3(30, 83, 50))
+	var sw = at.call(Vector3(130, 83, 150))
+	var down = at.call(Vector3(80, 120, 103))
+	var inside = at.call(Vector3(80, 83, 103))
+	var hint = w._dice_hint.get("node")
+	w._update_dice_hint()
+	var d = Vector2(keep.x - 80.0, keep.z - 103.0).length()
+	var other = w.dice_place_text(w.item_data.info(SEED))
+	_check("Richtungen: Norden '%s', Nordosten '%s', Südwesten '%s', darunter '%s', in der Box '%s'; Samen auf s9 '%s'" % [north, ne,
+		sw, down, inside, other], dest.call("DEST_NORTH") != "" and north == dest.call("DEST_NORTH") + h.texts()["dest_dist"] % 43
+		and ne.begins_with(dest.call("DEST_NORTHEAST")) and sw.begins_with(dest.call("DEST_SOUTHWEST"))
+		and down == dest.call("DEST_DOWNSIDE") and inside == "" and other == dest.call("DEST_ERRINSTANCE"))
+	_check("Hinweis-Modell %s an der Mitte (80 | 83 | 103): %s, sichtbar %s, Maßstab %.2f (2 + %.0f / 120 * 4)" % [
+		str(hint.name) if is_instance_valid(hint) else "-", str(hint.global_position) if is_instance_valid(hint) else "-",
+		hint.visible if is_instance_valid(hint) else false, hint.scale.x if is_instance_valid(hint) else 0.0, d],
+		is_instance_valid(hint) and hint.global_position.distance_to(Vector3(80, 83, 103)) < 0.01 and hint.visible == (d < 120.0)
+		and absf(hint.scale.x - (2.0 + d / 120.0 * 4.0)) < 0.01)
+
+# Symbol über dem Grab des Werwolf-Gottes, als wäre die Figur ein Werwolf mit laufendem 15358 (Zustand nur für diese
+# Probe, ohne await dazwischen wieder hergestellt); Effekte sind die echten der eigenen Figur
+func _tomb_icon(w) -> String:
+	var qd = w.quest_data
+	var keep = [qd.player, qd.active, qd.done]
+	qd.player = keep[0].duplicate()
+	qd.player["race"] = 6
+	qd.active = {WOLF_BLESSING: {}}
+	qd.done = {15355: true, 15357: true}
+	var icon = qd.head_icon(WOLF_TOMB)
+	qd.player = keep[0]
+	qd.active = keep[1]
+	qd.done = keep[2]
+	return icon
+
+# Treffer einer Sofort-Fertigkeit (B10): der Treffer von Gebet 1958 kommt vor der Antwort aufs Zaubern; die gemerkte Aktion
+# einer anderen Fertigkeit (hier eine mit Angriffspunkten) darf dann nicht abgespielt werden - vorher bekam der Magier nach
+# dem Feuerball beim Gebet einen Feuerball-Treffer ab
+func _stale_cast_hit(w) -> void:
+	var pts: Dictionary = w.player.model.get_meta("attack_points", {}) if w.player.model != null else {}
+	var stale = ""
+	for a in pts:
+		if not (pts[a] as Array).is_empty():
+			stale = str(a)
+			break
+	var spawned = []
+	var watch = func(n): spawned.append(n)
+	w.attack_fx.child_entered_tree.connect(watch)
+	var keep = w._casts.get(w.my_id, {})
+	w._casts[w.my_id] = {"act": stale, "start": Time.get_ticks_msec(), "skill": 122}
+	w._on_hit({"src": w.my_id, "dst": w.my_id, "skill": 1958, "bless": true, "dmg": 0, "hp": int(w.hud.stats.get("hp", 1)),
+		"max_hp": int(w.hud.stats.get("max_hp", 1))})
+	await _physics(90)
+	w.attack_fx.child_entered_tree.disconnect(watch)
+	w._casts[w.my_id] = keep
+	_check("Sofort-Treffer (Gebet) mit gemerkter Aktion '%s' einer anderen Fertigkeit: keine Angriffs-GFX (%d)" % [stale, spawned.size()],
+		stale != "" and spawned.is_empty())
 
 # Mana vor der Wirkung (letztes stats davor, auch Regeneration) und direkt danach (stats nach cooldown)
 func _skill_push(what: String, d: Dictionary) -> void:
@@ -1679,6 +2146,22 @@ func _until(cond: Callable, seconds: float = 10.0) -> void:
 func _until_ok(cond: Callable, seconds: float) -> bool:
 	await _until(cond, seconds)
 	return cond.call()
+
+# GFX / Klänge einer Aktion der eigenen Figur (Ereignisse und .att der Angriffspunkte)
+func _action_files(w, act: String) -> Array:
+	var out = []
+	var m = w.player.model
+	for e in m.get_meta("action_events", {}).get(act, []):
+		if not e["files"].is_empty():
+			out.append(str(e["files"][0]))
+	for p in m.get_meta("attack_points", {}).get(act, []):
+		for g in w.attack_fx.importer.att_gfx(w.attack_fx._att_of(str(p[1]))):
+			out.append(g)
+	return out
+
+# Von diesen Dateien die, die erst beim Abspielen geladen wurden: [[Datei, ms], ...]
+func _late_loads(w, files: Array) -> Array:
+	return w.attack_fx.late_loads.filter(func(l): return str(l[0]) in files)
 
 func _shot(shot_name: String) -> void:
 	await _frames(3)

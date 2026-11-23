@@ -9,6 +9,7 @@ extends EditorPlugin
 #   UI-XML/  Oberfläche des Spiels (AUI-XML) lesen und bauen, Leiste XML
 #   Server/  Server-Daten (Spawns, Höhen, Kollision, Vorlagen) und Leiste SERVER
 #   Abgleich/ Leiste ABGLEICH: passen Server- und Client-Daten zusammen (Match in %)
+#   Export/  Leiste EXPORT: Client / Server je Plattform exportieren (Client für Linux: alle Maps umwandeln + Godot-Export)
 #   Data/    gemeinsame Leser: Dateien / GBK, .pck-Pakete (angelica_pck.gd, angelica_vfs.gd: die
 #            Spieldaten werden direkt aus den Original-Paketen gelesen), elements.data, tasks.data
 #   Docs/    Fahrplan, Todo-Listen;  tools/  Erzeuger der Beschreibungen (Python / GDScript)
@@ -28,6 +29,7 @@ const PlayerDock = preload("GFX/gfx_player_dock.gd")
 const XmlPanel = preload("UI-XML/aui_xml_panel.gd")
 const ServerPanel = preload("Server/server_panel.gd")
 const CheckPanel = preload("Abgleich/check_panel.gd")
+const ExportPanel = preload("Export/export_panel.gd")
 const Sources = preload("GFX/gfx_sources.gd")
 const VFS = preload("Data/angelica_vfs.gd")
 
@@ -36,6 +38,7 @@ var _player_dock: EditorDock = null
 var _xml_panel: EditorDock = null
 var _server_panel: EditorDock = null
 var _check_panel: EditorDock = null
+var _export_panel: EditorDock = null
 
 # --- EINSTELLUNGEN ---
 const SPAWN_ABSTAND_X: float = 20.0
@@ -55,6 +58,8 @@ func _enter_tree():
 	add_dock(_server_panel)
 	_check_panel = CheckPanel.new()
 	add_dock(_check_panel)
+	_export_panel = ExportPanel.new()
+	add_dock(_export_panel)
 
 func _exit_tree():
 	remove_tool_menu_item("GFX Ausführen")
@@ -74,6 +79,10 @@ func _exit_tree():
 		remove_dock(_check_panel)
 		_check_panel.queue_free()
 		_check_panel = null
+	if _export_panel != null:
+		remove_dock(_export_panel)
+		_export_panel.queue_free()
+		_export_panel = null
 	if _server_panel != null:
 		remove_dock(_server_panel)
 		_server_panel.queue_free()

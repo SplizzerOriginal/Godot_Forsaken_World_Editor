@@ -64,7 +64,7 @@ func build_node(parent_node: Node, max_group_time: float) -> Node3D:
 	return build_container_node(parent_node, max_group_time)
 
 # Wie create_id_130, aber die ganze Unter-GFX bekommt einen Owner (wird mitgespeichert)
-func _create_element_node(parent_node: Node3D, root_node: Node, undo_redo: EditorUndoRedoManager, max_group_time: float):
+func _create_element_node(parent_node: Node3D, root_node: Node, undo_redo, max_group_time: float):
 	if parent_node.has_node(NodePath(_node_name())):
 		return
 

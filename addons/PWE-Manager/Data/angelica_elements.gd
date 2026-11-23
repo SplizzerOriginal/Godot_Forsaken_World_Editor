@@ -23,6 +23,9 @@ extends RefCounted
 # file_model) -> Pfad relativ zum Spielordner (models\npcs\...\x.ecm).
 # Ort: je Sprache ein data-Ordner (Deu / Franz / Eng unter den Spieldaten, gleicher Aufbau,
 # Texte in der Sprache), sonst data\ direkt im Spielordner (locate()).
+# Umgewandelt (Leiste EXPORT, Performance-Fahrplan P2f3; angelica_store.gd): je Liste eine Ressource mit ihren Sätzen, dazu
+# meta.res (Version, Größe / Anzahl je Liste, IDs je Liste) und talks.res (Gesprächsdaten) - open() nimmt dann den Speicher und lädt eine
+# Liste erst, wenn ein Satz daraus gebraucht wird; path.data kommt über angelica_files.gd / den Speicher.
 # ====================================================
 
 const SCHEMA_FILE = "angelica_elements_schema.json"
@@ -31,6 +34,8 @@ const HEADER_SIZE = 136 # Version + Export-Info
 const TAG_NAME = 0x19e75edf
 const TAG_INFO = 0xee35679f
 const PATH_ID = 0x504d4944 # "DIMP"
+const VFS = preload("angelica_vfs.gd")
+const Store = preload("angelica_store.gd")
 const PRIM_SIZE = {"i32": 4, "u32": 4, "f32": 4, "f64": 8, "i16": 2, "u16": 2, "i8": 1, "u8": 1, "bool": 1,
 	"wchar": 2, "i64": 8, "u64": 8}
 # Layout einer Liste
@@ -51,6 +56,10 @@ var _talk_offset = -1 # Beginn der Gesprächsdaten
 var _talks = {} # ID -> Gespräch (talks())
 var _files = null # angelica_files.gd (GBK für Pfade), optional
 var _schema: Dictionary = {} # angelica_elements_schema.json (je Instanz: eine statische Variable hielte das Skript bis zum Beenden fest)
+var _unsafe: Array = [] # Typen mit unsicheren Einfügestellen (Version)
+var _conv = "" # Ordner im umgewandelten Speicher ("" = aus der Datei)
+var _conv_ids: Dictionary = {} # Liste -> PackedInt64Array der IDs (umgewandelt)
+var _conv_lists = {} # Liste -> PackedByteArray der Sätze (geladen bei Bedarf)
 
 
 # elements.data öffnen -> "" oder Fehlertext
@@ -58,20 +67,27 @@ func open(file_path: String, files = null) -> String:
 	close()
 	path = file_path
 	_files = files
-	_f = FileAccess.open(file_path, FileAccess.READ)
-	if _f == null:
-		return file_path + " nicht lesbar"
 	var schema = load_schema()
 	if schema.is_empty():
 		return SCHEMA_FILE + " fehlt"
+	var st = VFS.stored_entry(file_path, files)
+	if not st.is_empty() and str(st[0]).ends_with("/" + Store.ELEMENTS_META):
+		var meta = Store.table(str(st[0]))
+		if not meta.is_empty():
+			_conv = str(st[0]).get_base_dir()
+			_conv_ids = meta.get("ids", {})
+			version = int(meta["version"])
+			_set_version(schema)
+			for sc in meta["lists"]:
+				lists.append(_list_info(lists.size(), int(sc[0]), int(sc[1]), 0, schema))
+			_talk_offset = 0
+			return ""
+	VFS.note(file_path)
+	_f = FileAccess.open(file_path, FileAccess.READ)
+	if _f == null:
+		return file_path + " nicht lesbar"
 	version = _f.get_32()
-	var vinfo: Dictionary = schema["versions"].get(str(version), {})
-	_patch = {}
-	var patches: Dictionary = vinfo.get("patch", {})
-	for t in patches:
-		_patch[t] = patches[t]
-	var unsafe: Array = vinfo.get("unsafe", [])
-	var known: Array = schema["lists"]
+	var vinfo = _set_version(schema)
 	var list_count: int = int(vinfo.get("lists", 0))
 	var size = _f.get_length()
 	var p = HEADER_SIZE
@@ -87,28 +103,80 @@ func open(file_path: String, files = null) -> String:
 			continue
 		if a == 0 or a > 200000 or c > 2000000 or p + 8 + a * c > size:
 			break # Gesprächsdaten
-		var i = lists.size()
-		var info = {"index": i, "size": a, "count": c, "offset": p + 8, "type": "", "space": "", "layout": UNKNOWN}
-		if i < known.size():
-			var t: String = known[i]["type"]
-			info["type"] = t
-			info["space"] = known[i]["space"]
-			var st: Dictionary = schema["structs"].get(t, {})
-			if st.get("size", -1) == a:
-				info["layout"] = FULL
-			elif _patch.has(t) and _patch[t]["size"] == a and not t in unsafe:
-				info["layout"] = SHIFTED
-			else:
-				info["layout"] = NAME_ONLY
-		lists.append(info)
+		lists.append(_list_info(lists.size(), a, c, p + 8, schema))
 		p += 8 + a * c
 	_talk_offset = p
 	if lists.is_empty():
 		return file_path + ": keine Listen gefunden"
 	return ""
 
+# Einfügestellen der Version -> Beschreibung der Version
+func _set_version(schema: Dictionary) -> Dictionary:
+	var vinfo: Dictionary = schema["versions"].get(str(version), {})
+	_patch = {}
+	var patches: Dictionary = vinfo.get("patch", {})
+	for t in patches:
+		_patch[t] = patches[t]
+	_unsafe = vinfo.get("unsafe", [])
+	return vinfo
+
+# Liste i mit Satzgröße a, Anzahl c (offset: Beginn der Sätze in der Datei) und ihr Aufbau laut Beschreibung
+func _list_info(i: int, a: int, c: int, offset: int, schema: Dictionary) -> Dictionary:
+	var info = {"index": i, "size": a, "count": c, "offset": offset, "type": "", "space": "", "layout": UNKNOWN}
+	var known: Array = schema["lists"]
+	if i < known.size():
+		var t: String = known[i]["type"]
+		info["type"] = t
+		info["space"] = known[i]["space"]
+		var st: Dictionary = schema["structs"].get(t, {})
+		if st.get("size", -1) == a:
+			info["layout"] = FULL
+		elif _patch.has(t) and _patch[t]["size"] == a and not t in _unsafe:
+			info["layout"] = SHIFTED
+		else:
+			info["layout"] = NAME_ONLY
+	return info
+
+# n Bytes ab off im Satz i der Liste l (aus der Datei oder der umgewandelten Liste)
+func _rec(l: Dictionary, i: int, off: int, n: int) -> PackedByteArray:
+	if _conv != "":
+		var b = _list_bytes(int(l["index"]))
+		var s0 = i * int(l["size"]) + off
+		return b.slice(s0, s0 + n)
+	_f.seek(l["offset"] + i * l["size"] + off)
+	return _f.get_buffer(n)
+
+func _list_bytes(li: int) -> PackedByteArray:
+	if not _conv_lists.has(li):
+		var p = _conv.path_join("list_%d.res" % li)
+		var blob = ResourceLoader.load(p, "", ResourceLoader.CACHE_MODE_IGNORE) if ResourceLoader.exists(p) else null
+		_conv_lists[li] = blob.bytes if blob != null else PackedByteArray()
+	return _conv_lists[li]
+
+# Alle Sätze einer Liste als Bytes (Umwandeln)
+func list_bytes(li: int) -> PackedByteArray:
+	var l: Dictionary = lists[li]
+	if _conv != "":
+		return _list_bytes(li)
+	_f.seek(l["offset"])
+	return _f.get_buffer(int(l["size"]) * int(l["count"]))
+
+# Gesprächsdaten am Ende als Bytes (Umwandeln, talks)
+func talk_bytes() -> PackedByteArray:
+	if _conv != "":
+		var tp = _conv.path_join(Store.ELEMENTS_TALKS)
+		var blob = ResourceLoader.load(tp, "", ResourceLoader.CACHE_MODE_IGNORE) if ResourceLoader.exists(tp) else null
+		return blob.bytes if blob != null else PackedByteArray()
+	if _f == null or _talk_offset < 0:
+		return PackedByteArray()
+	_f.seek(_talk_offset)
+	return _f.get_buffer(_f.get_length() - _talk_offset)
+
 func close() -> void:
 	_f = null
+	_conv = ""
+	_conv_ids = {}
+	_conv_lists = {}
 	lists = []
 	_talk_offset = -1
 	_talks = {}
@@ -185,9 +253,9 @@ func _index(space: String) -> void:
 		var fields: Array = _fields(l["type"])
 		if fields.is_empty() or fields[0][0] != "id":
 			continue
+		var conv_ids = _conv_ids.get(l["index"], null) if _conv != "" else null
 		for i in l["count"]:
-			_f.seek(l["offset"] + i * l["size"])
-			var id = _f.get_32()
+			var id = int(conv_ids[i]) if conv_ids != null else _rec(l, i, 0, 4).decode_u32(0)
 			if not map.has(id):
 				map[id] = [l["index"], i]
 	_ids[space] = map
@@ -216,8 +284,7 @@ func record(li: int, i: int) -> Dictionary:
 	var l: Dictionary = lists[li]
 	if i < 0 or i >= l["count"]:
 		return {}
-	_f.seek(l["offset"] + i * l["size"])
-	var b = _f.get_buffer(l["size"])
+	var b = _rec(l, i, 0, l["size"])
 	var out: Dictionary
 	if l["layout"] == FULL or l["layout"] == SHIFTED:
 		var steps: Array = _patch[l["type"]]["steps"] if l["layout"] == SHIFTED else []
@@ -243,8 +310,7 @@ func record_name(li: int, i: int) -> String:
 		off = _shift(off, _patch[l["type"]]["steps"])
 	if off + nf[3] > l["size"]:
 		return ""
-	_f.seek(l["offset"] + i * l["size"] + off)
-	return _wstr(_f.get_buffer(nf[3]), 0, nf[3] / 2)
+	return _wstr(_rec(l, i, off, nf[3]), 0, nf[3] / 2)
 
 # Feld "name" eines Typs: [Name, Typ, Offset, Bytes] oder []
 func _name_field(type: String) -> Array:
@@ -355,10 +421,9 @@ static func _wstr(b: PackedByteArray, off: int, chars: int) -> String:
 # [{"id", "text", "param", "param_addon"}]}]}}; Fenster parent 0xFFFFFFFF = erstes Fenster,
 # Options-ID mit oberstem Bit (0x80000000 ...) = Funktion (Dienst, Schließen ...)
 func talks() -> Dictionary:
-	if not _talks.is_empty() or _talk_offset < 0 or _f == null:
+	if not _talks.is_empty() or _talk_offset < 0 or (_f == null and _conv == ""):
 		return _talks
-	_f.seek(_talk_offset)
-	var b = _f.get_buffer(_f.get_length() - _talk_offset)
+	var b = talk_bytes()
 	var p = 4
 	var n = b.decode_u32(0) if b.size() >= 4 else 0
 	for i in n:
@@ -398,7 +463,7 @@ func path_of(path_id: int) -> String:
 
 func _load_paths(file_path: String) -> void:
 	_paths_loaded = true
-	var b = FileAccess.get_file_as_bytes(file_path)
+	var b: PackedByteArray = _files.get_bytes(file_path) if _files != null else FileAccess.get_file_as_bytes(file_path)
 	if b.size() < 8 or b.decode_u32(0) != PATH_ID:
 		return
 	var n = b.decode_u32(4)
@@ -426,6 +491,5 @@ func model_of(id: int, space: String = "essence") -> String:
 	for f in _fields(l["type"]):
 		if f[0] == "file_model" and f[3].is_empty():
 			var steps: Array = _patch[l["type"]]["steps"] if l["layout"] == SHIFTED else []
-			_f.seek(l["offset"] + at[1] * l["size"] + _shift(f[2], steps))
-			return path_of(_f.get_32())
+			return path_of(_rec(l, at[1], _shift(f[2], steps), 4).decode_u32(0))
 	return ""

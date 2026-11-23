@@ -24,10 +24,18 @@ extends RefCounted
 # Mehrere gleichnamige Kinder werden nacheinander gelesen, spätere Werte überschreiben frühere.
 # Texte können Farbcodes enthalten (^RRGGBB, ^O...), sie bleiben unverändert.
 # Alles weitere je Typ steht roh in "attrs" und im XML-Element "item" (Abfragen: angelica_xml.gd).
+# Umgewandelt (Leiste EXPORT, Performance-Fahrplan P2f4): read_dialog / read_string_table / read_layout nehmen das fertig
+# gelesene Ergebnis aus dem Speicher (Data/angelica_store.gd parsed, gleicher Stand dieses Lesers), Pfade darin relativ zum
+# Spieldaten-Ordner gespeichert (map_paths). Einen Dialog zu lesen kostete vor allem die Pfadauflösung (HUD: 20 Dialoge
+# ~590 ms, gespeichert ~25 ms).
 # ====================================================
 
 const XML = preload("angelica_xml.gd")
 const Files = preload("../Data/angelica_files.gd")
+const VFS = preload("../Data/angelica_vfs.gd")
+const Store = preload("../Data/angelica_store.gd")
+const CODE_FILES = ["angelica_ui.gd", "angelica_xml.gd"] # bestimmen das gelesene Ergebnis
+static var _code_stamp = ""
 
 const CONTROL_TYPES = ["CHECK", "COMBO", "CONSOLE", "EDIT", "IMAGEPICTURE", "LABEL", "LIST", "LIST2",
 	"PROGRESS", "RADIO", "SCROLL", "SLIDER", "STILLIMAGEBUTTON", "SUBDIALOG", "SUBVIEW", "TEXT", "TREE",
@@ -140,6 +148,12 @@ func read_layout(file_name: String) -> Array:
 	var path = interface_file(file_name if file_name.contains(".") else file_name + ".dcf")
 	if path == "":
 		return []
+	var cached = _cached(path, "dcf")
+	if cached != null:
+		return map_paths(cached, files.root, false)
+	return parse_layout(path)
+
+func parse_layout(path: String) -> Array:
 	var tokens = _tokens(files.decode(files.get_bytes(path)), true)
 	var out = []
 	var i = 0
@@ -157,9 +171,15 @@ func read_layout(file_name: String) -> Array:
 # .stf -> {Nummer: Text}
 func read_string_table(file_name: String) -> Dictionary:
 	var path = interface_file(file_name if file_name.contains(".") else file_name + ".stf")
-	var out = {}
 	if path == "":
-		return out
+		return {}
+	var cached = _cached(path, "stf")
+	if cached != null:
+		return cached
+	return parse_string_table(path)
+
+func parse_string_table(path: String) -> Dictionary:
+	var out = {}
 	var tokens = _tokens(XML.decode(files.get_bytes(path), files), false)
 	var i = 0
 	while i + 1 < tokens.size():
@@ -303,6 +323,12 @@ func read_dialog(file_name: String) -> Dictionary:
 	var path = interface_file(file_name)
 	if path == "":
 		return {}
+	var cached = _cached(path, "dialog")
+	if cached != null:
+		return map_paths(cached, files.root, false)
+	return parse_dialog(path)
+
+func parse_dialog(path: String) -> Dictionary:
 	var top = XML.load_file(path, files).get("children", [])
 	var item = top[0] if not top.is_empty() else {}
 	if item.is_empty() or item["name"].nocasecmp_to("DIALOG") != 0:
@@ -401,6 +427,54 @@ func _read_text(k: Dictionary, text: Dictionary, translated: bool) -> void:
 	for key in ["Bold", "Italic", "FreeType", "Vertical", "FadeColor", "HoverColor"]:
 		if XML.has_value(k, key):
 			text[key.to_snake_case()] = XML.bool_value(k, key)
+
+# ====================================================
+# UMGEWANDELT (Leiste EXPORT, P2f4)
+# ====================================================
+# Stand dieses Lesers (MD5 von CODE_FILES, 12 Zeichen); im exportierten Spiel "export"
+static func code_stamp() -> String:
+	if _code_stamp == "":
+		if OS.has_feature("template"):
+			_code_stamp = "export"
+		else:
+			var own: Script = XML
+			var ctx = HashingContext.new()
+			ctx.start(HashingContext.HASH_MD5)
+			for f in CODE_FILES:
+				ctx.update(FileAccess.get_file_as_bytes(own.resource_path.get_base_dir().path_join(f)))
+			_code_stamp = ctx.finish().hex_encode().substr(0, 12)
+	return _code_stamp
+
+# Fertig gelesenes Ergebnis aus dem Speicher (kind dialog / stf / dcf) oder null
+func _cached(path: String, kind: String):
+	var e = VFS.parsed_entry(path, kind, files)
+	if e.is_empty() or (e.size() > 2 and str(e[2]) != code_stamp()):
+		return null
+	var t = Store.table(str(e[0]))
+	return t.get("data") if t.has("data") else null
+
+# Aufgelöste Pfade eines gelesenen Ergebnisses (Dialog: file, Rahmen, Klänge, Bilder und Schrift der Steuerelemente;
+# Dialog-Liste: path) relativ zum Spieldaten-Ordner speichern (to_rel) bzw. auf den jetzigen setzen
+static func map_paths(data, root: String, to_rel: bool):
+	var f = func(p): return Store.relativize(str(p), root) if to_rel else Store.reroot(str(p), root)
+	if data is Array: # Dialog-Liste
+		for e in data:
+			e["path"] = f.call(e["path"])
+		return data
+	for k in ["file", "sound", "sound_close"]:
+		if data.has(k):
+			data[k] = f.call(data[k])
+	if data.get("frame", {}).has("path"):
+		data["frame"]["path"] = f.call(data["frame"]["path"])
+	for c in data.get("controls", []):
+		if c.has("sound"):
+			c["sound"] = f.call(c["sound"])
+		for r in c.get("resources", {}).values():
+			if r.has("path"):
+				r["path"] = f.call(r["path"])
+		if c.get("text", {}).has("font_file"):
+			c["text"]["font_file"] = f.call(c["text"]["font_file"])
+	return data
 
 # Resource-Kind -> {file, path, frames, frame_mode, interval, degree}
 func _resource(r: Dictionary) -> Dictionary:

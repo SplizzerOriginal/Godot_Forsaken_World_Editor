@@ -20,8 +20,11 @@ extends Node3D
 # NPCs und Monster: npc_enter / npc_move / npc_leave (world_npc.gd); Namen, Farben und Modelle
 # aus npc_data.gd (elements.data in der Sprache des Clients, Modelle aus dem Map-Import). Ist ein
 # Modell nicht importiert (Map vor Schritt 7 importiert), baut der Client es aus den Spieldaten
-# (ecm_importer.gd build_ecm, ohne angehängte Effekte; je Bild höchstens BUILD_BUDGET_US, jedes
+# (ecm_importer.gd build_ecm samt angehängten Effekten; je Bild höchstens BUILD_BUDGET_US, jedes
 # Modell einmal). Der Ladebildschirm bleibt, bis die NPCs im Umkreis (world_ready: npcs) da sind.
+# Alte Importe (B10): Modelle und Karten-Effekte tragen den Stand des GFX-Codes, mit dem ihre GFX gebaut sind
+# (gfx_refresh.gd); weicht er ab, baut der Client ihre GFX einmal mit dem aktuellen Code neu (Modelle in derselben
+# Warteschlange, Karten-Effekte danach je Datei, die Instanzen werden getauscht) - ohne die Map neu zu importieren.
 # Oberfläche (Schritt 8): hud.gd mit den Dialogen von <Skin>gameui; Werte der eigenen Figur aus
 # char_enter, Ziel über "target" (Klick auf eine Figur: local_player.gd picked, Tab: nächstes Monster
 # nach der Regel aus SelectTargetRule.lua, F1: eigene Figur; Ring unter dem Ziel), Chat "Sagen" (in den
@@ -79,6 +82,7 @@ const NpcData = preload("npc_data.gd")
 const WorldNpc = preload("world_npc.gd")
 const Hud = preload("hud.gd")
 const QuestData = preload("quest_data.gd")
+const RouteEscape = preload("route_escape.gd") # Ausweichschritt der Autoroute an Gebäudewänden (B2)
 const ItemData = preload("item_data.gd")
 const AttackFx = preload("attack_fx.gd")
 const PLAYER = "res://addons/PWE-Manager/ECM/angelica_player.gd"
@@ -93,6 +97,8 @@ const SKILL_DATA = "res://addons/PWE-Manager/Data/angelica_skills.gd"
 const BUFF_DATA = "res://addons/PWE-Manager/Data/angelica_buffs.gd"
 const ITEM_DESC = "res://addons/PWE-Manager/Data/angelica_itemdesc.gd" # Tooltips wie das Original (LuaItemDesc)
 const PRECINCT = "res://addons/PWE-Manager/Data/angelica_precinct.gd"
+const GFX_REFRESH = "res://addons/PWE-Manager/ECM/gfx_refresh.gd" # Stand des GFX-Codes, Neubau veralteter GFX (B10)
+const GFX_PARSER = "res://addons/PWE-Manager/GFX/gfx_parser.gd" # gemeinsamer Shader-Vorrat (Performance-Fahrplan P1)
 const LOADING = "LoadingGame.xml"
 const LOADING_IMAGE = "login\\%d.dds"
 const SEND_IDLE = 1.0 # Sekunden: ohne Änderung trotzdem senden
@@ -109,6 +115,26 @@ const STUCK_BLOCK_HALF = 0.8 # ... halbe Breite
 const STUCK_BLOCK_PROGRESS = 1.0 # m: erst sperren, wenn die Figur auf dieser Route so weit gekommen ist
 const ROUTE_TARGET_STOP = 3.0 # m: so weit vor einem Monster / Sammelpunkt aus einem Quest-Ziel-Link anhalten (Z3)
 const GATHER_MOVE = 0.3 # m: weiter bewegt = Sammeln abgebrochen
+# Quest-Würfel mit Ort (B22, CECHostPlayer::UseItemInPack): außerhalb der Box eine Richtung (DEST_* aus global_string.lua),
+# in DICE_HINT_NEAR m Nähe das Hinweis-Modell (file_hint_model) an der Mitte, DICE_HINT_TIME s lang, sichtbar bis
+# DICE_HINT_FADE m waagrecht (FADE_DIS), Maßstab 2 + Abstand / DICE_HINT_FADE * 4
+const DICE_HINT_NEAR = 50.0
+const DICE_HINT_FADE = 120.0
+const DICE_HINT_TIME = 10.0
+# Stufenaufstieg wie CECHostPlayer::LevelUp (B10): GFX am Spielermodell ohne Haken (PlayGfx RES_GFX_LEVELUP), Klang 2D
+# (Play2DAutoSound RES_SFX_LEVELUP); Quest-Sammelpunkte glitzern wie CECMatter::TickInView (RES_GFX_TASK_MINE), solange die
+# Quest ihres task_in läuft und noch nicht abschließbar ist
+const LEVELUP_GFX = "程序联入/角色升级.gfx"
+const LEVELUP_SFX = "程序联入/升级音效.wav"
+const LEVELUP_MAX = 8.0 # s, höchstens so lange (das GFX wiederholt sich sonst)
+const TASK_MINE_GFX = "程序联入/任务矿光效.gfx"
+# Sammel-Aktion (B10) wie CECHPWorkGather -> CECPlayer::PlayVocationAction: vocation_action_type -> mehrteilige Aktion
+# (PlayerUtil player_vocation_act), Name der Schleife aus action der Vorlage, sonst <Art>循环; dazu <Art>开始 / <Art>结束,
+# je in der Waffen-Variante (_<Waffenart>, sonst _空手)
+const VOCATION_ACTS = {1: "采矿", 2: "采摘", 3: "钓鱼", 4: "祈福", 5: "开锁"}
+const VOCATION_SEGMENTED = [1, 11] # ACT_VOCATION_MINING ... ACT_VOCATION_TYPE_11 (PlayerUtil::IsSegmentedAction)
+const DEST_KEYS = ["DEST_NORTHEAST", "DEST_SOUTHEAST", "DEST_EAST", "DEST_NORTHWEST", "DEST_SOUTHWEST", "DEST_WEST",
+	"DEST_NORTH", "DEST_SOUTH"]
 const CAST_MOVE = 0.3 # m: waagrecht weiter bewegt = Zaubern abbrechen (skill_cancel)
 const SKILL_CHASE = 5 # so oft läuft die Figur einem weiterziehenden Ziel nach, dann fragt sie den Server
 const FLOAT_TIME = 1.0 # s: schwebende Schadenszahl
@@ -158,6 +184,8 @@ var _attack_hold = 0 # ms: bis dahin nicht nachlaufen
 var talk_npc = 0 # NPC des offenen NPC-Fensters
 var missing_models = {} # Szene -> true (nicht importiert)
 var built_models = 0 # zur Laufzeit gebaute Modelle
+var refreshed_models = 0 # importierte Modelle, deren CoGfx mit dem aktuellen GFX-Code neu gebaut wurden (alter Import, B10)
+var refreshed_gfx = 0 # ebenso Karten-Effekte (je GFX-Datei)
 var light_added = "" # "" = Licht aus dem Import, sonst "Spieldaten" bzw. "Standard"
 var factory # angelica_player.gd, baut alle Figuren (liest .smd / .ski einmal)
 var ready_in_world = false
@@ -170,7 +198,20 @@ var _leaving = false
 var _player_script = load(PLAYER)
 var _scenes = {} # Szene -> PackedScene oder null
 var _built = {} # .ecm -> zur Laufzeit gebaute PackedScene oder null (fehlgeschlagen)
-var _build_queue: Array = [] # .ecm, die noch gebaut werden
+var _build_queue: Array = [] # .ecm, die noch gebaut werden, bzw. veraltete Modell-Szenen (_stale)
+var _stale = {} # importierte Modell-Szene mit GFX von einem älteren GFX-Code -> true, bis neu gebaut
+var _gfx_queue: Array = [] # Szenen veralteter Karten-Effekte (ECM_Import/gfx/...), die noch neu gebaut werden
+var _map_gfx = {} # Szene eines veralteten Karten-Effekts -> seine Instanzen in der Map
+var _gfx_refresh = load(GFX_REFRESH) if ResourceLoader.exists(GFX_REFRESH) else null
+var _gfx_parser = load(GFX_PARSER) if ResourceLoader.exists(GFX_PARSER) else null
+var shaders_shared = 0 # beim Laden auf den gemeinsamen Vorrat umgestellte Shader (Test)
+var blocked_contacts = 0 # Routen-Sperren ohne Fortschritt wegen Kontakt mit der Gebäude-Kollision (Test, B2)
+var escapes = 0 # Ausweichschritte der Autoroute an Gebäudewänden (route_escape.gd, Test)
+var load_times = {} # Betreten der Welt: Schritt -> ms seit dem vorigen (Performance-Fahrplan, Messung; Ausgabe "Welt: Laden")
+var _load_mark = 0
+var prewarmed = 0 # hinter dem Ladebildschirm vorgewärmte GFX-Szenen (nur GL, Test)
+var _dice_hint = {} # Hinweis-Modell eines Quest-Würfels: {node, pos, end ms} (B22)
+var _mine_glow = {} # NPC-ID eines Quest-Sammelpunkts -> sein Glitzer-GFX (B10)
 var _waiting = {} # .ecm -> NPC-IDs, die auf das Modell warten
 var _ring: MeshInstance3D
 var _target_seq = 0 # nur die Antwort der letzten Auswahl zählt
@@ -187,7 +228,7 @@ var _skills_state = {} # world_ready skills (für einen neu gebauten HUD)
 var skill_info = {} # "ID" -> Werte der bekannten Fertigkeiten vom Server (mp, time, cool, cast, act ...)
 var cooldowns = {} # ID -> [Ende ms, Dauer ms] (gemeinsam mit hud.gd)
 var casting = {} # eigenes Zaubern: {id, time, end, name, target, pos, cancel_sent}; {pending} wartet auf Antwort
-var _casts = {} # Figuren-ID -> {act, start}: Aktion der letzten Fertigkeit (Treffer-Effekte)
+var _casts = {} # Figuren-ID -> {act, start, skill}: Aktion der letzten Fertigkeit (Treffer-Effekte)
 var buffs = {} # Figuren- / Monster-ID -> [[Effekt, Stapel, Ende ms (0 = ohne Ende), Dauer ms, light]] (Statuseffekte)
 var seals = {} # eigene Siegel (Meldung seal): root, silent, melee, idle, diet, disarm, invincible -> bool
 var _buff_gfx = {} # Figuren- / Monster-ID -> {model: Instanz-ID des Modells, nodes: {light: Node3D}}
@@ -221,6 +262,8 @@ func start(p_login, p_info: Dictionary) -> void:
 		_progress(0.0)
 		aui.show_dialog(_loading)
 	aui.clear_background()
+	_load_mark = Time.get_ticks_msec()
+	load_times = {}
 	var err = await _load()
 	if err != "":
 		_hide_loading()
@@ -263,24 +306,92 @@ func start(p_login, p_info: Dictionary) -> void:
 	_add_skill_actions()
 	if hud != null:
 		hud.set_skills(_skills_state)
+	_lt("Anmelden + Fertigkeiten")
+	_preload_fx()
+	_lt("Effekte vorladen")
 	await _wait_npcs(int(r["data"].get("npcs", 0)))
+	_lt("Modelle")
+	await _prewarm_shaders()
+	_lt("Vorwärmen")
 	_refresh_quests()
 	_hide_loading()
+	var total = 0
+	for k in load_times:
+		total += int(load_times[k])
+	print("Welt: Laden %d ms - %s" % [total, ", ".join(load_times.keys().map(func(k): return "%s %d" % [k, load_times[k]]))])
 	player.input_enabled = true
 	ready_in_world = true
 	if hud != null:
 		hud.aui.visible = true
 	if built_models > 0:
-		print("Welt: %d NPC-Modelle aus den Spieldaten gebaut (ohne Effekte); für die importierten Modelle die Map %s im Editor neu importieren (Leiste ECM-GFX-MAP)" % [built_models, map_name])
+		print("Welt: %d NPC-Modelle aus den Spieldaten gebaut (%s); für die importierten Modelle die Map %s im Editor neu importieren (Leiste ECM-GFX-MAP)" % [
+			built_models, ", ".join(missing_models.keys().slice(0, 10).map(func(p): return str(p).get_file())), map_name])
+	if refreshed_models > 0 or not _gfx_queue.is_empty() or refreshed_gfx > 0:
+		print("Welt: GFX aus einem älteren Import mit dem aktuellen Code neu gebaut: %d Modelle, Karten-Effekte %d (+%d folgen)" % [
+			refreshed_models, refreshed_gfx, _gfx_queue.size()])
+
+# Vorwärmen (Performance-Fahrplan P1 d), nur mit GL: der Treiber übersetzt einen Shader erst beim ersten Zeichnen (warm
+# ~5 ms, mit kaltem Cache nach einer Änderung am GFX-Code ~120 ms je Shader) - sonst hängt das Bild, wenn ein Karten-Effekt
+# in Sicht kommt oder beim ersten Zaubern (B12: erster Feuerball ~1,2 s). Hinter dem Ladebildschirm jede GFX-Szene der Map
+# und die schon gebauten GFX (eigene Fertigkeiten, attack_fx.gd) einmal vor der Kamera zeichnen, ohne Klang. Vulkan
+# übersetzt beim Laden der Szene (Shader-Dateien, gfx_parser.gd Vorrat) - dort brächte es nur Ladezeit.
+# Häufige Effekte vorab in den Speicher (Performance-Fahrplan P3; die Fertigkeiten lädt _add_skill_actions samt GFX, Klängen
+# und Statuseffekt-GFX): Stufenaufstieg und Quest-Glitzer - sonst ruckelte ihr erstes Erscheinen. Unter GL zeichnet
+# _prewarm_shaders alles danach einmal.
+func _preload_fx() -> void:
+	if attack_fx == null or attack_fx.importer == null:
+		return
+	attack_fx.prewarm_gfx([LEVELUP_GFX, TASK_MINE_GFX])
+	attack_fx.prewarm_sounds([LEVELUP_SFX])
+
+func _prewarm_shaders() -> void:
+	if RenderingServer.get_current_rendering_method() != "gl_compatibility" or map_root == null:
+		return
+	var cam = get_viewport().get_camera_3d()
+	if cam == null:
+		return
+	var t0 = Time.get_ticks_msec()
+	var scenes = {}
+	for n in map_root.find_children("*", "Node3D", true, false):
+		var p: String = n.scene_file_path
+		if p != "" and n.owner == map_root and p.begins_with("res://ECM_Import/gfx/") and not scenes.has(p):
+			scenes[p] = load(p)
+	if attack_fx != null:
+		for k in attack_fx._gfx:
+			if attack_fx._gfx[k] != null:
+				scenes["fx:" + str(k)] = attack_fx._gfx[k]
+	var holder = Node3D.new()
+	holder.name = "Vorwaermen"
+	holder.position = Vector3(0.0, 0.0, -4.0)
+	for k in scenes:
+		var inst = (scenes[k] as PackedScene).instantiate() if scenes[k] is PackedScene else null
+		if inst == null:
+			continue
+		for c in inst.find_children("*", "", true, false):
+			var sc = c.get_script() as Script
+			if sc != null and sc.resource_path.get_file() == "gfx_sound_170.gd":
+				c.get_parent().remove_child(c)
+				c.free()
+		holder.add_child(inst)
+	cam.add_child(holder)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	holder.queue_free()
+	prewarmed = scenes.size()
+	print("Welt: Vorwärmen (GL): %d GFX-Szenen in %d ms" % [scenes.size(), Time.get_ticks_msec() - t0])
 
 func _hide_loading() -> void:
 	if _loading != null:
 		aui.hide_dialog(_loading)
 
-# Ladebildschirm bis die gemeldeten NPCs da und ihre Modelle gebaut sind
+# Ladebildschirm bis die gemeldeten NPCs da und ihre Modelle gebaut sind (dazu veraltete Karten-Effekte neu, B10)
 func _wait_npcs(expected: int) -> void:
 	var end = Time.get_ticks_msec() + NPC_WAIT_MS
-	while Time.get_ticks_msec() < end and (npcs.size() < expected or not _build_queue.is_empty()):
+	var got = false
+	while Time.get_ticks_msec() < end and (npcs.size() < expected or not _build_queue.is_empty() or not _gfx_queue.is_empty()):
+		if not got and npcs.size() >= expected:
+			got = true
+			_lt("NPC-Daten (%d, %d Modelle zu bauen)" % [npcs.size(), _build_queue.size()])
 		var todo = _build_queue.size()
 		_progress(1.0 if todo == 0 else 0.9 + 0.1 * float(built_models) / float(built_models + todo))
 		await get_tree().process_frame
@@ -305,11 +416,11 @@ func _load() -> String:
 	_progress(0.05)
 	await get_tree().process_frame # Ladebildschirm zeigen
 	await get_tree().process_frame
-	var scene = load(path) as PackedScene
-	if scene == null:
-		return _texts()["map_missing"] % [map_name, path]
-	_progress(0.55)
-	# Quests im Hintergrund indizieren (tasks.data, gut 1 s)
+	# Laden auf dem Hauptthread (s31: mehrere Sekunden ohne Netz; das Zeitlimit von Server und Client ist darum 30 s, B16).
+	# ResourceLoader.load_threaded_request blieb in Tests manchmal für immer IN_PROGRESS (erstes bzw. zweites Betreten).
+	_lt("Ladebildschirm")
+	# Daten im Hintergrund schon vor der Map (Performance-Fahrplan P2e: seit die eigene Figur schnell ist, wartete das Laden
+	# sonst bis zu 0,5 s auf die Quests); Quests indizieren (tasks.data, gut 1 s)
 	quest_data = QuestData.new()
 	_quest_thread = Thread.new()
 	_quest_thread.start(quest_data.open.bind(str(login.settings.value("data_root")), login.language))
@@ -333,32 +444,48 @@ func _load() -> String:
 	movemap = load(MOVEMAP).new()
 	_movemap_thread = Thread.new()
 	_movemap_thread.start(_load_movemap.bind(load(FILES), str(login.settings.value("data_root"))))
+	var scene = load(path) as PackedScene
+	if scene == null:
+		return _texts()["map_missing"] % [map_name, path]
+	_lt("Map laden")
+	_share_shaders(scene) # vor dem Instanzieren: gleiche GFX-Shader = ein Objekt (spart das Übersetzen je Kopie)
+	_progress(0.55)
 	map_root = scene.instantiate()
 	add_child(map_root)
 	_ensure_light()
+	_lt("Map einhängen")
 	_progress(0.65)
 	await get_tree().process_frame
 	_add_terrain_collision()
+	_lt("Gelände-Kollision")
 	_progress(0.7)
-	# Gebäude-Kollision im Thread (Hüllen der Gebäude lesen und zerlegen dauert ~1,5 s)
-	_thread = Thread.new()
-	_thread.start(_building_faces.bind(str(login.settings.value("data_root")), _bht_path()))
-	while _thread.is_alive():
-		await get_tree().process_frame
-	var coll: Dictionary = _thread.wait_to_finish()
-	_thread = null
-	collision_info = coll.duplicate()
-	collision_info.erase("faces")
-	for e in (coll["errors"] as Array).slice(0, 3):
-		warnings.append("Gebäude-Kollision: " + str(e))
-	var faces: PackedVector3Array = coll["faces"]
-	if not faces.is_empty():
-		var shape = ConcavePolygonShape3D.new()
-		shape.backface_collision = true
-		shape.set_faces(faces)
-		_buildings = _add_static("Gebaeude-Kollision", shape)
+	# Gebäude-Kollision: vorab beim Map-Import gespeichert (Performance-Fahrplan P2b), sonst im Thread aus den Hüllen der
+	# Gebäude (s9 3,1 s, s31 2,1 s)
+	var pre = _stored_collision(root_dir.path_join(map_name).path_join(map_name + "_collision.res"))
+	if pre != null:
+		collision_info = {"source": str(pre.get_meta("source", "Gebäude")) + " (vorab)", "buildings": pre.get_meta("buildings", 0),
+			"hulls": pre.get_meta("hulls", 0), "errors": pre.get_meta("errors", [])}
+		_buildings = _add_static("Gebaeude-Kollision", pre)
 	else:
-		warnings.append("keine Gebäude-Kollision für " + map_name)
+		_thread = Thread.new()
+		_thread.start(_building_faces.bind(str(login.settings.value("data_root")), _bht_path()))
+		while _thread.is_alive():
+			await get_tree().process_frame
+		var coll: Dictionary = _thread.wait_to_finish()
+		_thread = null
+		collision_info = coll.duplicate()
+		collision_info.erase("faces")
+		for e in (coll["errors"] as Array).slice(0, 3):
+			warnings.append("Gebäude-Kollision: " + str(e))
+		var faces: PackedVector3Array = coll["faces"]
+		if not faces.is_empty():
+			var shape = ConcavePolygonShape3D.new()
+			shape.backface_collision = true
+			shape.set_faces(faces)
+			_buildings = _add_static("Gebaeude-Kollision", shape)
+		else:
+			warnings.append("keine Gebäude-Kollision für " + map_name)
+	_lt("Gebäude-Kollision")
 	_progress(0.8)
 	await get_tree().process_frame
 	npc_data = NpcData.new()
@@ -370,6 +497,7 @@ func _load() -> String:
 	item_data.elements = npc_data.elements
 	item_data.files = load(FILES).new(str(login.settings.value("data_root")))
 	item_data.language = login.language
+	_lt("Spieldaten")
 	_progress(0.85)
 	await get_tree().process_frame
 	factory = _player_script.new(str(login.settings.value("data_root")))
@@ -379,6 +507,7 @@ func _load() -> String:
 		equip_models(own_equip, int(c["race"]), int(c["class"]), int(c["gender"])))
 	if err != "":
 		return _texts()["model"] % err
+	_lt("eigene Figur")
 	var height = maxf(1.0, factory.bounds().size.y)
 	player = LocalPlayer.new()
 	player.name = "Spieler"
@@ -393,6 +522,8 @@ func _load() -> String:
 		warnings.append(aerr)
 	else:
 		attack_fx.prewarm(player.model, _actions(own_equip)) # GFX der eigenen Angriffe (sonst ruckelt der erste)
+		_scan_map_gfx()
+	_lt("Angriffs-GFX")
 	player.manual_move.connect(_on_manual_move)
 	var pos: Array = info["pos"]
 	player.place(Vector3(pos[0], pos[1] + 0.05, pos[2]), float(info.get("dir", 0.0)))
@@ -401,6 +532,7 @@ func _load() -> String:
 	player.route_stuck.connect(_on_route_stuck)
 	while _movemap_thread.is_alive():
 		await get_tree().process_frame
+	_lt("warten Wegekarte")
 	var merr = _movemap_thread.wait_to_finish()
 	_movemap_thread = null
 	if merr != "":
@@ -408,6 +540,7 @@ func _load() -> String:
 		movemap = null
 	while _quest_thread.is_alive():
 		await get_tree().process_frame
+	_lt("warten Quests")
 	var qerr = _quest_thread.wait_to_finish()
 	_quest_thread = null
 	if qerr != "":
@@ -415,6 +548,7 @@ func _load() -> String:
 	if _skill_thread != null:
 		while _skill_thread.is_alive():
 			await get_tree().process_frame
+		_lt("warten Fertigkeiten")
 		var serr = _skill_thread.wait_to_finish()
 		_skill_thread = null
 		if serr != "":
@@ -423,6 +557,7 @@ func _load() -> String:
 	if _buff_thread != null:
 		while _buff_thread.is_alive():
 			await get_tree().process_frame
+		_lt("warten Statuseffekte")
 		var berr = _buff_thread.wait_to_finish()
 		_buff_thread = null
 		if berr != "":
@@ -434,6 +569,7 @@ func _load() -> String:
 	if _desc_thread != null:
 		while _desc_thread.is_alive():
 			await get_tree().process_frame
+		_lt("warten Texte")
 		var derr = _desc_thread.wait_to_finish()
 		_desc_thread = null
 		if derr != "":
@@ -447,9 +583,16 @@ func _load() -> String:
 	quest_data.player = {"name": c["name"], "level": int(c.get("level", 1)), "race": int(c["race"]),
 		"class": int(c["class"]), "gender": int(c["gender"])}
 	_make_hud()
+	_lt("HUD")
 	_progress(0.9)
 	await get_tree().process_frame
 	return ""
+
+# Ladeschritt beendet: Dauer seit dem vorigen merken (load_times)
+func _lt(label: String) -> void:
+	var now = Time.get_ticks_msec()
+	load_times[label] = now - _load_mark
+	_load_mark = now
 
 # HUD (bis zum Ende des Ladens unsichtbar: es liegt über dem Ladebildschirm)
 func _make_hud() -> void:
@@ -581,6 +724,19 @@ func _add_static(node_name: String, shape: Shape3D, xform: Transform3D = Transfo
 	body.add_child(cs)
 	add_child(body)
 	return body
+
+# Vorab gespeicherte Gebäude-Kollision der Map (Map-Import, angelica_buildings.gd collision_shape), null wenn sie fehlt oder
+# von einem anderen Stand des Kollisions-Codes stammt (dann rechnet _load sie wie bisher)
+func _stored_collision(path: String) -> ConcavePolygonShape3D:
+	if not ResourceLoader.exists(path) or not ResourceLoader.exists(BUILDINGS):
+		return null
+	var shape = load(path) as ConcavePolygonShape3D
+	if shape == null:
+		return null
+	# im exportierten Spiel gibt es keinen Quelltext für den Stempel - die Kollision kommt dort frisch aus dem Export
+	if not OS.has_feature("template") and str(shape.get_meta("collision_code", "")) != load(BUILDINGS).collision_stamp():
+		return null
+	return shape
 
 # map.bht des Server-Ordners der Map (Hauptwelt in Server/maps.json)
 func _bht_path() -> String:
@@ -791,22 +947,25 @@ func _add_npc(e) -> void:
 	var i: Dictionary = npc_data.info(int(e[1]))
 	var scene = _scene(i["scene"])
 	var pending = false
-	if scene == null:
+	if scene != null and _stale.has(i["scene"]):
+		scene = null # GFX von einem älteren GFX-Code: erst neu bauen (Warteschlange)
+		pending = true
+		_queue_build(i["scene"], id)
+	elif scene == null:
 		var ecm = npc_data.ecm_of(int(e[1]))
 		if _built.has(ecm):
 			scene = _built[ecm]
 		elif ecm != "":
 			pending = true
-			if not _waiting.has(ecm):
-				_waiting[ecm] = []
-				_build_queue.append(ecm)
-			_waiting[ecm].append(id)
+			_queue_build(ecm, id)
 	var n = WorldNpc.new()
 	n.setup(e, i, scene, npc_data.display_name(i, int(e[6])), npc_data.name_color(i, int(e[6])), pending)
 	add_child(n)
 	npcs[id] = n
 	if quest_data != null and quest_data.tasks != null and i["npc"]:
 		n.set_quest_icon(_icon(quest_data.head_icon(n.tid)))
+	if i.get("mine", false) and int(i.get("task", 0)) != 0:
+		_refresh_mine_glow.call_deferred() # neuer Quest-Sammelpunkt in Sicht
 
 # Modelle der Warteschlange bauen (je Bild höchstens BUILD_BUDGET_US, mindestens eins); Ring
 # unter dem Ziel und Minimap nachführen
@@ -820,6 +979,7 @@ func _process(delta: float) -> void:
 	if ready_in_world and hud != null and player != null:
 		_update_gather()
 		_update_use()
+		_update_dice_hint()
 		_update_attack()
 		_update_cast()
 	if ready_in_world and hud != null and player != null and _radar_t >= 1.0 / RADAR_RATE:
@@ -836,20 +996,127 @@ func _process(delta: float) -> void:
 			_update_buff_gfx(id)
 	var t0 = Time.get_ticks_usec()
 	while not _build_queue.is_empty() and (Time.get_ticks_usec() - t0 < BUILD_BUDGET_US):
-		var ecm: String = _build_queue.pop_front()
-		var scene = _build_model(ecm)
-		_built[ecm] = scene
-		for id in _waiting.get(ecm, []):
+		var key: String = _build_queue[0]
+		# veraltete Modell-Szene: erst ihre GFX-Dateien einzeln (je Schritt eine, über mehrere Bilder), dann zusammenbauen
+		var todo: Array = _stale_files(key) if _stale.has(key) else []
+		if not todo.is_empty():
+			attack_fx._scene(todo.pop_back())
+			continue
+		_build_queue.pop_front()
+		var scene: PackedScene
+		if _stale.has(key):
+			scene = _refresh_model(key)
+			_scenes[key] = scene
+			_stale.erase(key)
+		else:
+			scene = _build_model(key)
+			_built[key] = scene
+		for id in _waiting.get(key, []):
 			var n = npcs.get(id)
 			if n != null and is_instance_valid(n):
 				n.set_model(scene, float(npc_data.info(n.tid)["scale"]))
-		_waiting.erase(ecm)
+		_waiting.erase(key)
+	while _build_queue.is_empty() and not _gfx_queue.is_empty() and (Time.get_ticks_usec() - t0 < BUILD_BUDGET_US):
+		_refresh_map_gfx(_gfx_queue.pop_front())
+
+# Modell (.ecm bzw. veraltete Modell-Szene) für eine NPC-ID in die Bau-Warteschlange
+func _queue_build(key: String, id: int) -> void:
+	if not _waiting.has(key):
+		_waiting[key] = []
+		_build_queue.append(key)
+	_waiting[key].append(id)
+
+# Noch nicht gebaute GFX-Dateien (FxFilePath) der CoGfx einer veralteten Modell-Szene; beim ersten Aufruf aus der .ecm
+func _stale_files(path: String) -> Array:
+	if attack_fx == null or attack_fx.importer == null:
+		return []
+	if typeof(_stale[path]) != TYPE_ARRAY:
+		var files = {}
+		if attack_fx != null and attack_fx.importer != null:
+			var ecm: Dictionary = attack_fx.importer.read_ecm(str(_gfx_refresh._root_meta(_scenes.get(path), "ecm_path", "")))
+			for e in ecm.get("cogfx", []):
+				if int(e.get("type", 0)) == 100 and not e.get("files", []).is_empty():
+					files[str(e["files"][0]).replace("\\", "/")] = true
+		_stale[path] = files.keys()
+	var left: Array = _stale[path]
+	while not left.is_empty() and attack_fx._gfx.has(left[-1]):
+		left.pop_back()
+	return left
+
+# Importierte Modell-Szene mit GFX von einem älteren GFX-Code: CoGfx mit dem aktuellen Code neu (gfx_refresh.gd), die GFX
+# aus dem Cache von attack_fx.gd (je Datei einmal gebaut)
+func _refresh_model(path: String) -> PackedScene:
+	var old: PackedScene = _scenes.get(path)
+	if _gfx_refresh == null or attack_fx == null or attack_fx.importer == null:
+		return old
+	var r: Dictionary = _gfx_refresh.refresh_model(attack_fx.importer, old, attack_fx._scene)
+	refreshed_models += 1
+	return r["scene"]
+
+# Karten-Effekte aus einem älteren Import (Instanzen von ECM_Import/gfx/... ohne den aktuellen Stand): je Datei merken
+func _scan_map_gfx() -> void:
+	if _gfx_refresh == null or map_root == null:
+		return
+	var seen = {}
+	for n in map_root.find_children("*", "Node3D", true, false):
+		var p: String = n.scene_file_path
+		if p == "" or n.owner != map_root or _gfx_refresh.gfx_path(p) == "":
+			continue
+		if not seen.has(p):
+			seen[p] = _gfx_refresh.outdated(load(p) as PackedScene)
+			if seen[p]:
+				_map_gfx[p] = []
+				_gfx_queue.append(p)
+		if seen[p]:
+			_map_gfx[p].append(n)
+
+# Karten-Effekt mit dem aktuellen GFX-Code neu bauen und alle seine Instanzen tauschen (Lage, Tempo, Alpha, Tageszeit,
+# Sichtbarkeit und Laufen wie die alte; angelica_world_objects.gd schaltet sie danach wie gewohnt)
+func _refresh_map_gfx(p: String) -> void:
+	var nodes: Array = _map_gfx.get(p, [])
+	_map_gfx.erase(p)
+	var packed: PackedScene = attack_fx._scene(_gfx_refresh.gfx_path(p)) if attack_fx != null else null
+	if packed == null:
+		return
+	for old in nodes:
+		if not is_instance_valid(old) or old.get_parent() == null:
+			continue
+		var neu = packed.instantiate()
+		var parent = old.get_parent()
+		var idx = old.get_index()
+		var nm = old.name
+		neu.transform = old.transform
+		for k in ["Play_Speed", "Alpha"]:
+			if k in old and k in neu:
+				neu.set(k, old.get(k))
+		for m in old.get_meta_list():
+			if m != _gfx_refresh.STAMP_META:
+				neu.set_meta(m, old.get_meta(m))
+		neu.visible = old.visible
+		neu.process_mode = old.process_mode
+		parent.remove_child(old)
+		old.queue_free()
+		parent.add_child(neu)
+		parent.move_child(neu, idx)
+		neu.name = nm
+	refreshed_gfx += 1
 
 func _build_model(ecm: String) -> PackedScene:
+	# umgewandelt (Map-Import, Leiste EXPORT: Modelle aller NPC- / Monster-Vorlagen und Hinweis-Modelle) mit aktuellem GFX-Stand
+	var conv: String = npc_data.importer().scene_of(ecm)
+	if conv != "" and ResourceLoader.exists(conv):
+		var packed_conv = load(conv) as PackedScene
+		if packed_conv != null and (_gfx_refresh == null or not _gfx_refresh.outdated(packed_conv)):
+			return packed_conv
 	var r: Dictionary = npc_data.importer().build_ecm(ecm)
 	if r.has("error"):
 		warnings.append(r["error"])
 		return null
+	# angehängte GFX (CoGfx) wie beim Import, gebaut zur Laufzeit (gfx_refresh.gd, Cache von attack_fx.gd)
+	if _gfx_refresh != null and attack_fx != null and attack_fx.importer != null:
+		var ecm_data: Dictionary = attack_fx.importer.read_ecm(ecm)
+		if not ecm_data.has("error"):
+			_gfx_refresh.add_cogfx(attack_fx.importer, r["root"], ecm_data, attack_fx._scene)
 	var packed = PackedScene.new()
 	var err = packed.pack(r["root"])
 	r["root"].free()
@@ -858,6 +1125,13 @@ func _build_model(ecm: String) -> PackedScene:
 		return null
 	built_models += 1
 	return packed
+
+# Geladene Szene vor dem ersten Instanzieren auf den gemeinsamen Shader-Vorrat umstellen (gfx_parser.gd share_scene,
+# Performance-Fahrplan P1): jedes eigene Shader-Objekt kostet beim Einhängen eigene Arbeit (Vulkan ~12 ms, GL ~7 ms), auch
+# wenn derselbe Text schon übersetzt ist
+func _share_shaders(scene: PackedScene) -> void:
+	if _gfx_parser != null and scene != null:
+		shaders_shared += _gfx_parser.share_scene(scene)
 
 # Importierte Modell-Szene (einmal geladen), null wenn nicht importiert
 func _scene(path: String) -> PackedScene:
@@ -868,6 +1142,10 @@ func _scene(path: String) -> PackedScene:
 		_scenes[path] = load(path) as PackedScene if ok else null
 		if not ok:
 			missing_models[path] = true
+		else:
+			_share_shaders(_scenes[path])
+		if ok and _gfx_refresh != null and _gfx_refresh.outdated(_scenes[path]):
+			_stale[path] = true # GFX von einem älteren GFX-Code (alter Import): _add_npc lässt sie neu bauen (dann Liste der Dateien)
 	return _scenes[path]
 
 
@@ -1162,6 +1440,8 @@ func _on_route_finished(arrived: bool) -> void:
 func _on_route_stuck() -> void:
 	if route.is_empty() or _route_thread != null:
 		return
+	if int(route["replans"]) < ROUTE_REPLANS and _try_escape():
+		return
 	_block_ahead()
 	if int(route["replans"]) >= ROUTE_REPLANS:
 		if hud != null:
@@ -1172,24 +1452,69 @@ func _on_route_stuck() -> void:
 	req["replans"] = int(req["replans"]) + 1
 	_search(req)
 
-# Steckt die Figur auf der Route fest (ein Hindernis, das die Wegekarte nicht kennt, z.B. ein Pfosten neuer Gebäude), die Felder
-# kurz vor ihr in Richtung des nächsten Wegpunkts sperren (movemap block_strip), damit die neue Suche außen herum führt - nur, wenn
-# sie seit dem Start der Route vorangekommen ist (kommt sie gar nicht los, liegt es nicht an einem Hindernis auf dem Weg, und
-# Sperren rings um sie würden den Start einschließen)
+# Steckt die Figur auf der Route fest (ein Hindernis, das die Wegekarte nicht kennt, z.B. eine dünne Wand, die ihre Felder nicht
+# abbilden), die Felder kurz vor ihr in Richtung des nächsten Wegpunkts sperren (movemap block_strip), damit die neue Suche außen
+# herum führt - wenn sie seit dem Start der Route vorangekommen ist oder nachweislich an der Gebäude-Kollision ansteht (Wand gegen
+# die Laufrichtung, Balken über ihr; z.B. die Seitenwand der Bude am Wiederbelebungspunkt von s9). Steht sie ohne beides, liegt
+# es nicht an einem Hindernis auf dem Weg, und Sperren rings um sie würden den Start einschließen
 func _block_ahead() -> void:
 	if movemap == null or player == null or not player.target is Vector3:
 		return
 	var p = player.global_position
 	var from: Vector3 = route.get("from", p)
-	if Vector2(p.x - from.x, p.z - from.z).length() < STUCK_BLOCK_PROGRESS:
-		return
 	var to: Vector3 = player.target
+	if Vector2(p.x - from.x, p.z - from.z).length() < STUCK_BLOCK_PROGRESS and not _blocked_by_building(Vector2(to.x - p.x, to.z - p.z)):
+		return
 	var g = _ground_y(p)
 	var c: Vector2i = movemap.cell_of(p.x, p.z)
 	var layer: int = movemap.which_layer(c, p.y - g) if not is_nan(g) else movemap.min_passable_layer(c)
 	blocked_cells += movemap.block_strip(p, Vector2(to.x - p.x, to.z - p.z), layer, STUCK_BLOCK_NEAR, STUCK_BLOCK_FAR, STUCK_BLOCK_HALF)
 
-# NPC-Link (Vorlage tid): sichtbarer NPC -> hin und ansprechen; sonst sein Ort aus task_npc.data
+# Steht die Figur an der Gebäude-Kollision (Wand gegen die Laufrichtung, Balken über ihr): Ausweichschritt mit der echten
+# Kollision und neue Route von dort (route_escape.gd), statt Felder zu sperren - das endete z.B. in der Bude am
+# Wiederbelebungspunkt von s9 in "kein Weg". -> true, wenn die Figur einer neuen Route folgt
+func _try_escape() -> bool:
+	if movemap == null or player == null or not player.target is Vector3:
+		return false
+	var p = player.global_position
+	var to: Vector3 = player.target
+	if not _blocked_by_building(Vector2(to.x - p.x, to.z - p.z)):
+		return false
+	var goal: Vector3 = route["goal"]
+	var gy_from = _ground_y(p)
+	var gy_to = _ground_y(goal) if route["exact"] else NAN
+	var esc: Dictionary = RouteEscape.find(player, movemap, goal, maxf(0.0, p.y - gy_from) if not is_nan(gy_from) else 0.0,
+		is_nan(gy_to), 0.0 if is_nan(gy_to) else maxf(0.0, goal.y - gy_to))
+	if esc.is_empty():
+		return false
+	route["replans"] = int(route["replans"]) + 1
+	escapes += 1
+	player.follow_path(esc["path"], float(route["stop"]))
+	return true
+
+# Stößt die Figur in Laufrichtung dir an die Gebäude-Kollision? (Kontakte des letzten move_and_slide: Wand mit Normale gegen
+# die Laufrichtung oder Fläche über ihr mit Normale nach unten; der Boden zählt nicht)
+func _blocked_by_building(dir: Vector2) -> bool:
+	if _buildings == null or player == null or dir.length() < 0.001:
+		return false
+	var d = dir.normalized()
+	for k in player.get_slide_collision_count():
+		var c = player.get_slide_collision(k)
+		if c.get_collider() != _buildings:
+			continue
+		var n: Vector3 = c.get_normal()
+		if n.y < -0.5:
+			blocked_contacts += 1
+			return true
+		var nh = Vector2(n.x, n.z)
+		if absf(n.y) < 0.7 and nh.length() > 0.01 and nh.normalized().dot(d) < -0.3:
+			blocked_contacts += 1
+			return true
+	return false
+
+# NPC-Link (Vorlage tid): sichtbarer NPC -> hin und ansprechen; sonst sein Ort vom Server (quest_where "npc": seine
+# Spawn-Daten - die task_npc.data des neueren Clients hat z.B. die Werwolf-NPCs wie Edward Olgen schon in s43 "Land der
+# Entstehung", der Server in s31); kennt der Server ihn nicht, gilt task_npc.data
 func route_npc(tid: int) -> void:
 	if player == null or npc_data == null:
 		return
@@ -1197,6 +1522,16 @@ func route_npc(tid: int) -> void:
 	var id = _nearest_npc(tid)
 	if id != 0:
 		talk_to(id)
+		return
+	var r = await session.quest_where("npc", tid, 0)
+	if hud == null or player == null:
+		return
+	if r["code"] == Proto.Code.OK:
+		var at: Array = r["data"].get("pos", [])
+		if int(r["data"].get("world", 0)) != int(info.get("world", 0)):
+			hud.add_system(hud.texts()["route_far"] % Hud._plain(label))
+		elif at.size() >= 3:
+			route_to(Vector3(at[0], at[1], at[2]), label, tid, TALK_RANGE - 0.5, 0, true)
 		return
 	var where: Array = quest_data.npc_pos.get(tid, []) if quest_data != null else []
 	if where.is_empty():
@@ -1401,12 +1736,55 @@ func _start_gather(id: int) -> void:
 		"desc": str(i.get("desc", "")) if str(i.get("desc", "")) != "" else hud.texts()["gather"], "pos": player.global_position}
 	player.face(n.global_position)
 	hud.set_progress(gathering["desc"], 0.0)
+	var acts = gather_acts(i)
+	if not acts.is_empty() and player.play_segment(acts[0], acts[1]):
+		gathering["acts"] = acts
+
+# Sammel-Aktion eines Sammelpunkts -> [Start, Schleife, Ende] in der Waffen-Variante der eigenen Figur ([] = keine);
+# baut fehlende Aktionen am Modell nach (angelica_player.gd add_actions)
+# Wie CECPlayer::PlayVocationAction: Arten 1 - 11 sind mehrteilig (IsSegmentedAction, PlaySegmentedAction); sonst
+# (Art 0, z.B. Lagerfeuer, Heuhaufen, Kürbis, Ei der Grünen Kröte am Boden) nur die Schleife "<action>_<Waffe>", ohne
+# Start und Ende - ohne action nichts (Stehen)
+func gather_acts(i: Dictionary) -> Array:
+	var loop = str(i.get("action", ""))
+	var t = int(i.get("act_type", 0))
+	var names: Array
+	if t >= VOCATION_SEGMENTED[0] and t <= VOCATION_SEGMENTED[1]:
+		var base = str(VOCATION_ACTS.get(t, loop.trim_suffix("循环") if loop.ends_with("循环") else ""))
+		if base == "":
+			return []
+		names = [base + "开始", base + "循环", base + "结束"]
+	elif loop != "":
+		names = ["", loop, ""]
+	else:
+		return []
+	var suffix = str(player.suffix) if player != null else "空手"
+	var want = []
+	for nm in names:
+		if nm != "":
+			for v in [nm + "_" + suffix, nm + "_空手", nm + "_通用", nm]:
+				if not v in want:
+					want.append(v)
+	if factory != null and player != null and player.model != null:
+		factory.add_actions(player.model, want) # baut nur die fehlenden
+	var out = []
+	for nm in names:
+		var pick = ""
+		if nm != "" and player != null and player.anim != null:
+			for v in [nm + "_" + suffix, nm + "_空手", nm + "_通用", nm]:
+				if player.anim.has_animation(v):
+					pick = v
+					break
+		out.append(pick)
+	return out if out[1] != "" else []
 
 # Jedes Bild: Fortschritt; bewegt sich die Figur, bricht das Sammeln ab
 func _update_gather() -> void:
 	if gathering.is_empty():
 		return
 	if player.global_position.distance_to(gathering["pos"]) > GATHER_MOVE:
+		if gathering.has("acts"):
+			player.stop_once()
 		gathering = {}
 		hud.set_progress("", 0.0)
 		session.gather_cancel()
@@ -1419,11 +1797,23 @@ func _update_gather() -> void:
 func _use_item(pos: int) -> void:
 	if not using.is_empty() or not gathering.is_empty() or player.dead:
 		return
+	if not casting.is_empty():
+		hud.add_system(Proto.text(Proto.Code.SKILL_BUSY, login.language))
+		return
+	var bag_e = hud.inventory["bag"].get(pos)
+	if bag_e != null and item_data != null:
+		var where = dice_place_text(item_data.info(int(bag_e[0])))
+		if where != "": # nicht am Ort: nur die Richtung, nichts an den Server (wie das Original)
+			hud.add_system(where)
+			return
 	var r = await session.item_use(pos)
 	if hud == null:
 		return
 	if r["code"] != Proto.Code.OK:
 		hud.add_system(Proto.text(r["code"], login.language))
+		return
+	if r["data"].has("skill"): # Fertigkeits-Gegenstand (B17): wirkt wie ein Einsetzen, Ende mit skill_end
+		_item_cast(r["data"])
 		return
 	var secs = float(r["data"].get("time", 0))
 	if secs <= 0.0:
@@ -1432,6 +1822,101 @@ func _use_item(pos: int) -> void:
 	using = {"slot": pos, "time": secs, "end": Time.get_ticks_msec() + int(secs * 1000.0),
 		"desc": desc if desc != "" else hud.texts()["use"], "pos": player.global_position}
 	hud.set_progress(using["desc"], 0.0)
+
+# Quest-Würfel mit Ort (item_data at): "" am Ort (oder ohne Ort), sonst die Richtung wie CECHostPlayer::UseItemInPack -
+# DEST_ERRINSTANCE auf einer anderen Map; Himmelsrichtung nach der Lage zur Box (schräg: nach dem Winkel zur Mitte), dazu
+# (Wunsch des Spielers) der Abstand zur Mitte; in der Box nur zu hoch / zu tief: DEST_DOWNSIDE / DEST_UPSIDE. In
+# DICE_HINT_NEAR m Nähe erscheint das Hinweis-Modell an der Mitte
+func dice_place_text(i: Dictionary) -> String:
+	var at: Array = i.get("at", [])
+	if at.is_empty() or player == null:
+		return ""
+	if world_tag() != int(at[0]):
+		return _dest_text("DEST_ERRINSTANCE")
+	var pos: Vector3 = player.global_position
+	var center: Vector3 = at[1]
+	var half: Vector3 = at[2]
+	if pos.distance_to(center) <= DICE_HINT_NEAR:
+		_show_dice_hint(str(i.get("hint", "")), center)
+	var x = 0 if pos.x < center.x - half.x else (1 if pos.x > center.x + half.x else 2)
+	var z = 0 if pos.z < center.z - half.z else (1 if pos.z > center.z + half.z else 2)
+	if x == 2 and z == 2:
+		if pos.y < center.y - half.y:
+			return _dest_text("DEST_UPSIDE")
+		if pos.y > center.y + half.y:
+			return _dest_text("DEST_DOWNSIDE")
+		return ""
+	var key: String = DEST_KEYS[x * 3 + z]
+	var dist = pos.distance_to(center)
+	if x < 2 and z < 2 and dist > 0.1:
+		var f = asin(clampf((center.z - pos.z) / dist, -1.0, 1.0))
+		var east = center.x - pos.x > 0.0
+		if f < -PI * 3.0 / 8.0:
+			key = "DEST_SOUTH"
+		elif f < -PI / 8.0:
+			key = "DEST_SOUTHEAST" if east else "DEST_SOUTHWEST"
+		elif f < PI / 8.0:
+			key = "DEST_EAST" if east else "DEST_WEST"
+		elif f < PI * 3.0 / 8.0:
+			key = "DEST_NORTHEAST" if east else "DEST_NORTHWEST"
+		else:
+			key = "DEST_NORTH"
+	var flat = Vector2(center.x - pos.x, center.z - pos.z).length()
+	return _dest_text(key) + hud.texts()["dest_dist"] % int(round(flat))
+
+func _dest_text(key: String) -> String:
+	var t = hud.game_text(key)
+	return t if t != "" else key
+
+# Welt-Nummer der Map (Server/maps.json tag der Hauptwelt; sonst "s<Nummer>")
+func world_tag() -> int:
+	if ResourceLoader.exists(SPAWNS):
+		var src: Array = load(SPAWNS).sources(map_name)
+		if not src.is_empty():
+			return int(src[0]["tag"])
+	return map_name.substr(1).to_int() if map_name.begins_with("s") and map_name.substr(1).is_valid_int() else -1
+
+# Hinweis-Modell des Quest-Würfels an der Mitte des Orts (zur Laufzeit gebaut, Aktion "动画" in Schleife)
+func _show_dice_hint(ecm: String, center: Vector3) -> void:
+	if _dice_hint.has("node") and is_instance_valid(_dice_hint["node"]):
+		_dice_hint["node"].queue_free()
+	_dice_hint = {}
+	if ecm == "" or npc_data == null:
+		return
+	ecm = npc_data.importer().find_game_file(ecm) # Pfad der Spieldaten (models\...) -> Datei, wie die NPC-Modelle
+	if ecm == "":
+		return
+	if not _built.has(ecm):
+		_built[ecm] = _build_model(ecm)
+	var scene: PackedScene = _built[ecm]
+	if scene == null:
+		return
+	var node = scene.instantiate() as Node3D
+	node.name = "Wuerfel-Hinweis"
+	add_child(node)
+	node.global_position = center
+	var ap = node.get_node_or_null("AnimationPlayer") as AnimationPlayer
+	if ap != null and not ap.get_animation_list().is_empty():
+		var list = ap.get_animation_list()
+		var a = "动画" if list.has("动画") else list[0] # das Original spielt "动画"; ein einzelnes Modell hat oft nur eine
+		ap.get_animation(a).loop_mode = Animation.LOOP_LINEAR
+		ap.play(a)
+	_dice_hint = {"node": node, "pos": center, "end": Time.get_ticks_msec() + int(DICE_HINT_TIME * 1000.0)}
+	_update_dice_hint()
+
+func _update_dice_hint() -> void:
+	if _dice_hint.is_empty():
+		return
+	var node = _dice_hint["node"]
+	if not is_instance_valid(node) or Time.get_ticks_msec() >= int(_dice_hint["end"]):
+		if is_instance_valid(node):
+			node.queue_free()
+		_dice_hint = {}
+		return
+	var c: Vector3 = _dice_hint["pos"]
+	var d = Vector2(player.global_position.x - c.x, player.global_position.z - c.z).length() if player != null else 0.0
+	node.visible = d < DICE_HINT_FADE
+	node.scale = Vector3.ONE * (2.0 + d / DICE_HINT_FADE * 4.0)
 
 func _update_use() -> void:
 	if using.is_empty():
@@ -1452,8 +1937,14 @@ func _gather_end(d: Dictionary) -> void:
 	if hud == null:
 		return
 	var was = not gathering.is_empty()
+	var acts: Array = gathering.get("acts", [])
 	gathering = {}
 	hud.set_progress("", 0.0)
+	if not acts.is_empty():
+		if d.get("ok", false):
+			player.end_segment(str(acts[2])) # Ende der Sammel-Aktion, dann Stehen
+		else:
+			player.stop_once()
 	if not d.get("ok", false):
 		return
 	var got: Array = d.get("items", [])
@@ -1655,11 +2146,28 @@ func _start_skill(id: int, tid: int) -> void:
 	var act = _weapon_act(str(i.get("act", "")))
 	casting = {"id": id, "time": t, "end": Time.get_ticks_msec() + t, "target": tid, "pos": player.global_position,
 		"name": Hud._plain(skill_data.skill_name(id)) if skill_data != null else str(id), "act": act}
-	_casts[my_id] = {"act": act, "start": Time.get_ticks_msec()}
+	_casts[my_id] = {"act": act, "start": Time.get_ticks_msec(), "skill": id}
 	player.mark_fight()
 	var length = player.play_skill(act)
 	if attack_fx != null and attack_fx.importer != null:
 		attack_fx.play_events(player, player.model, act, length, t / 1000.0 if act.contains("循环") else 0.0)
+	if t > 0:
+		hud.set_progress(casting["name"], 0.0)
+
+# Fertigkeits-Gegenstand (Antwort von item_use mit skill, B17): Zaubern wie _start_skill, Name des Gegenstands im Balken
+func _item_cast(d: Dictionary) -> void:
+	var id = int(d.get("skill", 0))
+	var t = int(d.get("time", 0))
+	var act = _weapon_act(str(d.get("act", "")))
+	if t > 0:
+		player.target = null
+	casting = {"id": id, "time": t, "end": Time.get_ticks_msec() + t, "target": my_id, "pos": player.global_position,
+		"name": Hud._plain(item_data.info(int(d.get("id", 0)))["name"]), "act": act, "item": int(d.get("id", 0))}
+	_casts[my_id] = {"act": act, "start": Time.get_ticks_msec(), "skill": id}
+	if act != "":
+		var length = player.play_skill(act)
+		if attack_fx != null and attack_fx.importer != null:
+			attack_fx.play_events(player, player.model, act, length, 0.0)
 	if t > 0:
 		hud.set_progress(casting["name"], 0.0)
 
@@ -1709,12 +2217,12 @@ func _other_skill(d: Dictionary) -> void:
 	var act = str(d.get("act", ""))
 	var r = remotes.get(src)
 	if r == null or r.model == null:
-		_casts[src] = {"act": act, "start": Time.get_ticks_msec()}
+		_casts[src] = {"act": act, "start": Time.get_ticks_msec(), "skill": int(d.get("id", 0))}
 		return
 	if factory != null and r.anim != null:
 		factory.add_actions(r.model, _act_variants(act, r.suffix)) # baut nur die fehlenden
 	act = _weapon_act(act, r)
-	_casts[src] = {"act": act, "start": Time.get_ticks_msec()}
+	_casts[src] = {"act": act, "start": Time.get_ticks_msec(), "skill": int(d.get("id", 0))}
 	var dst = _node_of(int(d.get("dst", 0)))
 	if dst != null:
 		r.face(dst.global_position)
@@ -1749,6 +2257,14 @@ func _add_skill_actions() -> void:
 				acts.append(v)
 	if factory.add_actions(player.model, acts) > 0 and attack_fx != null and attack_fx.importer != null:
 		attack_fx.prewarm(player.model, acts)
+	# GFX der Statuseffekte, die die Fertigkeiten auslösen (Server: skill_info lights), an der eigenen Figur und am Ziel (P3)
+	if attack_fx != null and attack_fx.importer != null and buff_data != null and info.has("char"):
+		var lights = []
+		for k in skill_info:
+			for l in skill_info[k].get("lights", []):
+				if not l in lights:
+					lights.append(l)
+		attack_fx.prewarm_gfx(buff_data.light_gfx(int(info["char"]["race"]), int(info["char"]["class"]), lights))
 
 # Eine Aktion ohne Waffe (_空手) gibt es je Waffenart (kombinierte Aktionen der .ecm, z.B. 回城循环_巨剑 mit eigenem
 # GFX und Klang): [Variante der Waffe, die genannte, die allgemeine (_通用)]; sonst nur die genannte
@@ -1793,7 +2309,13 @@ func _on_hit(d: Dictionary) -> void:
 	var action = ""
 	var skill = int(d.get("skill", 0))
 	if src != null and dst != null and skill != 0: # Fertigkeit: Aktion läuft seit dem Zaubern
-		action = str(_casts.get(int(d.get("src", 0)), {}).get("act", ""))
+		# nur die Aktion derselben Fertigkeit (B10): bei Sofort-Fertigkeiten wie Gebet kommt der Treffer vor der Antwort aufs
+		# Zaubern - die gemerkte Aktion war noch die vorige (Feuerball) und schoss deren Feuerball auf die eigene Figur
+		var c: Dictionary = _casts.get(int(d.get("src", 0)), {})
+		if int(c.get("skill", 0)) == skill:
+			action = str(c.get("act", ""))
+		elif src == player and skill_info.has(str(skill)):
+			action = _weapon_act(str(skill_info[str(skill)].get("act", "")))
 		if src.has_method("face"):
 			src.face(dst.global_position)
 	elif src != null and dst != null:
@@ -1839,7 +2361,10 @@ func _set_buffs(id: int, list: Array) -> void:
 		buffs[id] = out
 	if hud != null:
 		if id == my_id:
+			var before = hud.my_buffs.map(func(b): return int(b[0]))
 			hud.set_buffs(out)
+			if out.map(func(b): return int(b[0])) != before:
+				_refresh_quest_icons() # Effekt-Bedingungen (m_PremBuff, need_buffs): z.B. graues "!" am Grab wird gelb
 		if id == target_id and hud.target_id == id:
 			hud.set_target_buffs(out)
 	_update_buff_gfx(id)
@@ -1978,7 +2503,7 @@ func _award_task(id: int) -> void:
 		hud.add_system(Proto.text(r["code"], login.language))
 
 func _abandon(id: int) -> void:
-	var r = await session.quest_abandon(id)
+	var r = await session.quest_abandon(int(quest_data.top_of(quest_data.task(id)).get("id", id)) if quest_data != null else id)
 	if hud != null and r["code"] != Proto.Code.OK:
 		hud.add_system(Proto.text(r["code"], login.language))
 
@@ -1989,9 +2514,16 @@ func _refresh_quests() -> void:
 	hud.set_trace(quest_data.trace(func(tid): return npc_data.info(tid)["name"]))
 	hud.refresh_quests()
 	hud.refresh_lvup() # Shylias Markt: Knöpfe nach Quest-Zustand
+	_refresh_quest_icons()
+
+# Symbole über den NPCs (nach Quest-Zustand und eigenen Effekten)
+func _refresh_quest_icons() -> void:
+	if quest_data == null or quest_data.tasks == null:
+		return
 	for n in npcs.values():
 		if npc_data.info(n.tid)["npc"]:
 			n.set_quest_icon(_icon(quest_data.head_icon(n.tid)))
+	_refresh_mine_glow()
 
 func _icon(icon_name: String) -> Texture2D:
 	if icon_name == "":
@@ -2082,6 +2614,53 @@ func _set_stats(d: Dictionary) -> void:
 		hud.set_stats(d)
 		if int(d.get("level", old_level)) > old_level:
 			hud.add_info(hud.texts()["level_up"] % int(d["level"]))
+			_level_up_fx()
+
+# Stufenaufstieg: GFX am Modell (ohne Haken: an den Füßen, folgt der Figur) für seine Länge, Klang ohne Ort
+func _level_up_fx() -> Node3D:
+	if attack_fx == null or attack_fx.importer == null or player == null:
+		return null
+	var n = attack_fx.attach(player, player.model, LEVELUP_GFX, "")
+	if n != null:
+		var g = n if n.has_method("player_length_ms") else n.find_child("*", false, false)
+		var life = LEVELUP_MAX
+		if g != null and g.has_method("player_length_ms"):
+			life = clampf(g.player_length_ms() / 1000.0, 0.5, LEVELUP_MAX)
+		get_tree().create_timer(life).timeout.connect(n.queue_free)
+	var stream = attack_fx._sound(LEVELUP_SFX)
+	if stream != null:
+		var sp = AudioStreamPlayer.new()
+		sp.name = "Stufenaufstieg"
+		sp.stream = stream
+		add_child(sp)
+		sp.finished.connect(sp.queue_free)
+		sp.play()
+	return n
+
+# Glitzer der Quest-Sammelpunkte (task_in läuft, noch nicht abschließbar), nach jedem Quest-Zustand / jeder Tasche
+func _refresh_mine_glow() -> void:
+	if quest_data == null or quest_data.tasks == null or attack_fx == null or attack_fx.importer == null or npc_data == null:
+		return
+	for id in _mine_glow.keys():
+		if not npcs.has(id) or not is_instance_valid(_mine_glow[id]):
+			if is_instance_valid(_mine_glow.get(id)):
+				_mine_glow[id].queue_free()
+			_mine_glow.erase(id)
+	for id in npcs:
+		var n = npcs[id]
+		var i: Dictionary = npc_data.info(n.tid)
+		var task = int(i.get("task", 0))
+		var want = i.get("mine", false) and task != 0 and quest_data.is_active(task) and not quest_data.can_finish(task)
+		if want and not _mine_glow.has(id):
+			var sc: PackedScene = attack_fx._scene(TASK_MINE_GFX)
+			if sc != null:
+				var g = sc.instantiate()
+				g.name = "Quest_Glitzer"
+				n.add_child(g)
+				_mine_glow[id] = g
+		elif not want and _mine_glow.has(id):
+			_mine_glow[id].queue_free()
+			_mine_glow.erase(id)
 
 func _say(text: String) -> void:
 	var r = await session.say(text)

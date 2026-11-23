@@ -108,6 +108,16 @@ func gfx(race: int, prof: int, light: int) -> Array:
 		e = _gfx.get(0, {}).get(light)
 	return e if e != null else []
 
+# GFX-Pfade zu Sichtbar-Indizes (light) für die eigene Rasse / Klasse und für Monster (allgemeine Zeile) - zum Vorladen
+# der Statuseffekte der eigenen Fertigkeiten (Performance-Fahrplan P3)
+func light_gfx(race: int, prof: int, lights: Array) -> Array:
+	var out = []
+	for light in lights:
+		for e in [gfx(race, prof, int(light)), gfx(0, 0, int(light))]:
+			if not e.is_empty() and str(e[0]) != "" and not str(e[0]) in out:
+				out.append(str(e[0]))
+	return out
+
 func _config_file(file_name: String) -> String:
 	for base in ["resources/configs", "configs"]:
 		var p = files.resolve("%s/%s" % [base, file_name])

@@ -16,6 +16,8 @@ extends SceneTree
 #    wieder an und steht an derselben Stelle. Verbindung hängt: Rs Netz steht still; eine neue
 #    Anmeldung ohne "erzwingen" -> ACCOUNT_ONLINE, erzwungen -> OK, die hängende Sitzung fliegt
 #    (Z sieht R gehen und wiederkommen), R steht an derselben Stelle.
+#  4 Client lädt (Bug-Fahrplan B16): Zs Netz steht 8 s still (wie beim Laden einer großen Map) -> Z bleibt verbunden
+#    (Zeitlimit net_timeout 30 s); Gegenprobe zum Schluss mit einem Server mit net_timeout 2: er gibt die stille Verbindung auf.
 # Zum Schluss sauber beenden: Status gestoppt, niemand online, keine Fehler im Server-Log.
 # Ende: "NEUSTART-TEST OK" (Exit 0) oder "NEUSTART-TEST FEHLER" (Exit 1), nach 300 s Abbruch (Exit 2).
 # ====================================================
@@ -28,6 +30,7 @@ const TestUtil = preload("test_util.gd")
 const DIR = "user://test_server/neustart"
 const DEFAULT_PORT = 29110
 const PASSWORD = "geheim-123"
+const LOAD_PAUSE = 8 # s Stillstand (Laden von s31 dauerte bis ~9 s am Stück)
 const LOOK = {"face": 1, "mask": 2, "hair": 3, "skin": 4, "hair_color": 0xD25720}
 const VESTRY = 14429
 const ADAM = 14432
@@ -74,6 +77,7 @@ func _run() -> void:
 		return
 	var at = await _crash(r, rc, rest["pos"])
 	await _reconnect(r, z, rc, zc, at)
+	await _loading_pause(z)
 	for s in [r, z]:
 		if s.state == Session.State.LOGGED_IN:
 			await s.logout()
@@ -82,6 +86,7 @@ func _run() -> void:
 	_check("Status: gestoppt, niemand online", st.get("running", true) == false and st.get("players", [1]).is_empty())
 	var errors = Array(srv.log_text().split("\n")).filter(func(l): return l.contains("FEHLER"))
 	_check("keine Fehler im Server-Log %s" % str(errors.slice(0, 3)), errors.is_empty())
+	await _short_timeout(zc)
 	_end(0 if failures == 0 else 1)
 
 
@@ -224,6 +229,38 @@ func _reconnect(r: Session, z: Session, rc: int, zc: int, at: Vector3) -> void:
 	var kicked = func(): return r.state == Session.State.OFFLINE and r.last_kick == Proto.Code.LOGGED_IN_ELSEWHERE
 	_check("hängende Sitzung erfährt 'an anderer Stelle angemeldet'", await u.until(kicked, 5.0))
 	await r2.logout()
+
+
+# ====================================================
+# 4 CLIENT LÄDT (Bug-Fahrplan B16)
+# ====================================================
+# Ein Client, der beim Laden einer Map mehrere Sekunden nicht antwortet (Netz steht still), bleibt verbunden: Zeitlimit
+# net_timeout 30 s statt der ENet-Vorgabe 5 s. Z (seit dem Wiedereintritt in der Welt, die Verbindung hatte schon Verkehr)
+# steht LOAD_PAUSE s still, danach geht die nächste Anfrage durch
+func _loading_pause(z: Session) -> void:
+	u.freeze(z)
+	await create_timer(LOAD_PAUSE).timeout
+	u.thaw(z)
+	var r = await z.select_target(0)
+	_check("Z stand %d s still (wie beim Laden einer Map) und ist noch verbunden (%s)" % [LOAD_PAUSE, Proto.text(r["code"])],
+		z.state == Session.State.LOGGED_IN and r["code"] == Proto.Code.OK)
+
+# Gegenprobe zum Zeitlimit: ein Server mit net_timeout 2 gibt eine still stehende Verbindung nach spätestens 4 s auf
+func _short_timeout(zc: int) -> void:
+	srv.extra = ["--maps=s9", "--net_timeout=2"]
+	_check("Server mit net_timeout 2 startet", await srv.start(self))
+	if not srv.running():
+		return
+	var q = u.session("Q", port)
+	var ok = (await q.login("Neustart_Z", PASSWORD))["code"] == Proto.Code.OK and not (await _enter(q, zc)).is_empty()
+	u.freeze(q)
+	var gone = func(): return srv.log_text().contains("Abgemeldet: Neustart_Z")
+	var dropped = await u.until(gone, LOAD_PAUSE)
+	u.thaw(q)
+	_check("net_timeout 2: der Server gibt die still stehende Verbindung auf (in der Welt %s, getrennt %s)" % [ok, dropped],
+		ok and dropped)
+	q.close()
+	await srv.stop(self)
 
 
 # ====================================================

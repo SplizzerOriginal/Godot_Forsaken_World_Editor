@@ -26,6 +26,9 @@ extends RefCounted
 # Speicher: load_all() hält alle Quests (Client v184: ~260 MB); index_all() merkt sich nur, wo jede
 # Quest steht (Teildatei, Nummer, oberste Quest), get_task() liest sie dann bei Bedarf samt ihrer
 # Unteraufgaben (die zuletzt gelesene Teildatei bleibt zwischengespeichert).
+# Umgewandelt (Leiste EXPORT, Performance-Fahrplan P2f3): der Index liegt fertig im Speicher (angelica_store.gd
+# tasks_index; gilt bei gleicher Export-Zeit der tasks.data und gleichem Stand dieses Skripts), die Teildateien kommen
+# über angelica_files.gd aus dem Speicher.
 # ====================================================
 
 const SCHEMA_FILE = "angelica_tasks_schema.json"
@@ -40,6 +43,7 @@ const METHODS = {0: "Unteraufgaben", 1: "Monster töten", 2: "Gegenstände samme
 	19: "Arena verlieren", 20: "Arena bestreiten"}
 const SCALE_EXTRA = {"ratio": 128, "items": 132, "count": 128, "submit": 32} # Bytes nach der Stufenzahl
 const LANGUAGES = ["Deu", "Eng", "Franz"]
+const Store = preload("angelica_store.gd")
 # Vorbedingungen, die das Spiel (Godot-Server und -Client) noch nicht prüft: mit einem Wert ungleich
 # 0 / false ist eine Quest der obersten Ebene vorerst nicht vergebbar (CheckPrerequisite des gs).
 # Nicht dabei: m_i64RegionMask (Server-Regionen, CCheckRegionMask: unser Server gilt für alle) und
@@ -181,7 +185,14 @@ static func buff_list(raw_list, count: int) -> Array:
 	return out
 
 # Alle Teildateien einmal lesen, aber nur merken, wo jede Quest steht -> Anzahl der obersten Ebene
+# (umgewandelt: der fertige Index aus dem Speicher)
 func index_all() -> int:
+	var conv = Store.tasks_index(path)
+	if not conv.is_empty() and int(conv.get("export_time", -1)) == export_time and \
+			(OS.has_feature("template") or str(conv.get("code", "")) == code_stamp()):
+		index = conv["index"]
+		top = conv["top"]
+		return top.size()
 	index = {}
 	top = []
 	for k in pack_count:
@@ -195,6 +206,13 @@ func index_all() -> int:
 			top.append(t["id"])
 	_indexing = []
 	return top.size()
+
+# Stand dieses Skripts (MD5, 12 Zeichen) für den umgewandelten Index; im exportierten Spiel "export"
+static func code_stamp() -> String:
+	if OS.has_feature("template"):
+		return "export"
+	var own: Script = load("res://addons/PWE-Manager/Data/angelica_tasks.gd")
+	return FileAccess.get_md5(own.resource_path).substr(0, 12)
 
 func _bytes(p: String) -> PackedByteArray:
 	return _files.get_bytes(p) if _files != null else FileAccess.get_file_as_bytes(p)
@@ -308,6 +326,8 @@ func _award(b: PackedByteArray, at: Array) -> Dictionary:
 	var a = {"gold": _ua(raw, "m_ulGoldNum"), "exp": _ua(raw, "m_ulExp"), "sp": _ua(raw, "m_ulSP"),
 		"reputation": _ua(raw, "m_ulReputation"), "new_task": _ua(raw, "m_ulNewTask"), "items": [],
 		"skill": _ua(raw, "m_lSkillID"), "skill_level": _ua(raw, "m_lSkillLev"), "del_skill": _ua(raw, "m_lDelSkillID"),
+		# Effekt (Buff) als Belohnung, z.B. 15790 "Wunsch der Ahnen" (Werwolf-Kette)
+		"buff": _s32(_ua(raw, "m_lBuffId")), "buff_level": _s32(_ua(raw, "m_lBuffLev")),
 		# Seelenmünzen (gebundenes Geld); gold_revise: Gold und Seelenmünzen * Stufenfaktor der Figur,
 		# höchstens bis Stufe gold_revise_lev (PLAYER_TALENT_CONFIG task_money_factor / task_bind_money_factor)
 		"bind_money": _s32(_ua(raw, "m_iBindMoney")), "bind_algo": _s32(_ua(raw, "m_ulBindMoneyAlgo")),

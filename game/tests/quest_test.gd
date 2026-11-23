@@ -9,8 +9,9 @@ extends SceneTree
 #                      jede Rasse bekommt ab Stufe 10 (Server-tasks.data) beim ersten auto_deliver genau ihren Segen (Stufe 1),
 #                      auf Stufe 1 noch nicht; die Quest ist erfüllt und läuft nicht; ein zweites auto_deliver vergibt nichts mehr
 #   Werwolf-Kette      15358 "Segen des Wolfs" händigt 44134 aus (given); 15396 "Lauscht dem Ruf" ist nur mit laufender
-#                      Mit-Quest 15358 annehmbar (cotask); ihr Warte-Teil 15791 "Werwolfanbetung" endet erst mit den Effekten
-#                      2885 / 2886 (fin_buffs; im Spiel aus 4571 / 4572, hier gesetzt), die Folgequest 15766 ist mit dem
+#                      Mit-Quest 15358 (cotask) und dem Blut-Effekt 2886 (need_buffs, B20) annehmbar; ihr Warte-Teil 15790 belohnt mit Fertigkeit 4571 (award buff ->
+#                      Effekt 2885), 15791 "Werwolfanbetung" endet erst mit 2885 und 2886 (fin_buffs; 2886 kommt im Spiel vom
+#                      Blut des Werwolfgottes / 4572, hier gesetzt - das Benutzen prüft item_test), die Folgequest 15766 ist mit dem
 #                      ausgehändigten Gegenstand sofort erfüllt; 15358 zählt das Erfüllen von 15396 (Methode 11, n 1/1) und
 #                      lässt sich am NPC 43384 abschließen: Mondnebel 4582, danach versteckt die Verwandlung nach Geschlecht
 #                      (männlich 4215, nicht 4216)
@@ -87,7 +88,19 @@ class FakeSkills:
 		p["skills"].erase(int(id))
 		forgotten.append([p["id"], int(id)])
 
+# Effekt-Belohnung (award buff, skill_cast.gd deliver_buff): merkt sich die Fertigkeit; 4571 legt wie im Spiel Effekt 2885 an
+class FakeCasting:
+	var delivered: Array = [] # [Figur, Fertigkeit, Stufe]
+	func deliver_buff(p, id, level) -> int:
+		delivered.append([p["id"], int(id), int(level)])
+		var states = {4571: 2885, 4573: 2887}
+		if states.has(int(id)):
+			p["buffs"].append({"id": states[int(id)], "stack": 1})
+			return 1
+		return 0
+
 var q
+var cast_fake: FakeCasting
 var inv: FakeInventory
 var sk: FakeSkills
 var checks = 0
@@ -101,6 +114,8 @@ func _initialize() -> void:
 	sk = FakeSkills.new()
 	q.inventory = inv
 	q.skills = sk
+	cast_fake = FakeCasting.new()
+	q.casting = cast_fake
 	var err = q.load_templates()
 	_check("Quest-Daten geladen %s" % err, err == "")
 	if err != "":
@@ -157,19 +172,26 @@ func _werewolf() -> void:
 	q.deliver(1, p, 15358)
 	_check("15358 händigt 44134 aus (Tasche %d)" % inv.count_of(p, 44134), inv.count_of(p, 44134) == 1)
 	_check("15358 noch nicht erfüllt (n 0/1)", not q._goal_reached(p, 15358))
-	_check("15396 mit laufender Mit-Quest 15358 annehmbar", q.can_deliver(p, 15396) == Proto.Code.OK)
+	var no_blood = q.can_deliver(p, 15396)
+	p["buffs"].append({"id": 2886, "stack": 1}) # Blut des Werwolfgottes (4572, Benutzen: item_test)
+	_check("15396 mit laufender Mit-Quest 15358: ohne Blut-Effekt 2886 %s (need_buffs, B20), mit %s" % [no_blood,
+		q.can_deliver(p, 15396)], no_blood == Proto.Code.QUEST_CONDITIONS and q.can_deliver(p, 15396) == Proto.Code.OK)
 	q.deliver(1, p, 15396)
+	p["buffs"] = p["buffs"].filter(func(b): return int(b["id"]) != 2886) # Effekt abgelaufen, bevor 2885 kommt
 	for i in 3:
 		q.tick(1, p) # Warte-Teil 15790, dann 15791 (1 s)
 	_wait_over(p, 15791)
 	q.tick(1, p)
-	_check("15791 'Werwolfanbetung' wartet ohne die Effekte 2885 / 2886 (fin_buffs)", p["quests"]["active"].has(15791)
+	_check("15790 'Wunsch der Ahnen' belohnt mit Fertigkeit 4571 Stufe 1 auf die Figur (award buff, %s)" % str(cast_fake.delivered),
+		cast_fake.delivered.has([p["id"], 4571, 1]))
+	_check("15791 'Werwolfanbetung' wartet mit 2885, ohne 2886 (fin_buffs)", p["quests"]["active"].has(15791)
 		and not p["quests"]["done"].has(15396))
-	p["buffs"] = [{"id": 2885, "stack": 1}, {"id": 2886, "stack": 1}] # später: Blut des Werwolfgottes (4572), Grab (4571)
+	p["buffs"].append({"id": 2886, "stack": 1}) # Blut erneut benutzt
 	q.tick(1, p)
 	var n = int(p["quests"]["active"].get(15358, {}).get("p", {}).get("n", 0))
-	_check("mit beiden Effekten: 15396 erfüllt, Folgequest 15766 mit 44134 sofort erfüllt, 15358 zählt mit (n %d)" % n,
-		p["quests"]["done"].get(15396, {}).get("ok", false) and p["quests"]["done"].get(15766, {}).get("ok", false) and n == 1)
+	_check("mit beiden Effekten: 15396 erfüllt (Belohnung 4573), Folgequest 15766 mit 44134 sofort erfüllt, 15358 zählt mit (n %d)" % n,
+		p["quests"]["done"].get(15396, {}).get("ok", false) and p["quests"]["done"].get(15766, {}).get("ok", false) and n == 1
+		and cast_fake.delivered.has([p["id"], 4573, 1]))
 	var npc = {"tid": 43384, "pos": p["pos"]}
 	var r = q.complete(1, p, npc, 15358)
 	var got = _learned(p)

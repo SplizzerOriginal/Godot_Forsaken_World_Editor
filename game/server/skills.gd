@@ -44,6 +44,7 @@ var log_line: Callable
 var info_of: Callable # (p, ID) -> Werte der Fertigkeit (skill_cast.gd info), Meldung skill_info beim Lernen
 var on_learn: Callable # (p, ID) nach dem Lernen / einer neuen Stufe (skill_cast.gd apply_passive: Dauer-Effekte, F7)
 var templates = {} # ID -> Fertigkeit (skill_cast.gd templates, setzt der Server)
+var _class_cache = {} # "Klasse_Rasse_Anzahl" -> class_skills (sortierte IDs)
 var learn_factor: Array = [] # class_templates.json learn_money_factor (je Figurenstufe)
 var stats_push: Callable # (peer, p): Geld nach dem Lernen
 
@@ -171,12 +172,20 @@ func _save(p: Dictionary, id: int, level: int, is_new: bool) -> bool:
 # LERNEN (F8)
 # ====================================================
 # Klassen-Fertigkeiten, die die Figur lernen kann (wie LearnCondition ohne Stufe / Geld), nach ID
+# (je Klasse / Rasse einmal gesucht: die Vorlagen enthalten auch die Fertigkeiten von Quest-Belohnungen und Gegenständen,
+# ~1100 - das Anmelden vieler Figuren zugleich soll sie nicht jedes Mal durchlaufen; nur lesen, nicht ändern)
 func class_skills(p: Dictionary) -> Array:
+	var key = "%d_%d_%d" % [int(p["class"]), int(p["race"]), templates.size()]
+	if not _class_cache.has(key):
+		_class_cache[key] = _find_class_skills(int(p["class"]), int(p["race"]))
+	return _class_cache[key]
+
+func _find_class_skills(cls: int, race: int) -> Array:
 	var out = []
 	for id in templates:
 		var s: Dictionary = templates[id]
 		var req: Array = s.get("require_level", [])
-		if int(s["from"]) == 1 and int(s["class"]) == int(p["class"]) and int(s["race"]) in [0, int(p["race"])] \
+		if int(s["from"]) == 1 and int(s["class"]) == cls and int(s["race"]) in [0, race] \
 				and int(s.get("max_learn", 0)) > 0 and not req.is_empty() and int(req[0]) > 0:
 			out.append(int(id))
 	out.sort()

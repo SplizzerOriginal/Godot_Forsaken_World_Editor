@@ -4,7 +4,8 @@ extends RefCounted
 # Gegenstände im Client (Schritt 10b), je Vorlage einmal gelesen aus der elements.data der Sprache
 # (npc_data.gd elements):
 #   info(id)    {id, name, type, quality, icon, mask, lv, race, prof, gender, hp, mp, dmg [min, max],
-#               def, hit, range, pile, price, equip}
+#               def, hit, range, pile, price, equip}; Quest-Würfel mit Ort dazu at [Welt, Mitte, halbe Kanten] und hint
+#               (Hinweis-Modell, B22)
 #   icon(id)    Symbol: file_icon -> path.data nennt eine Datei (z.B. surfaces\武器图标\x.dds), die es
 #               einzeln nicht gibt - sie steht in den Symbol-Atlanten surfaces\iconset\iconlist_ivtr0 - 2
 #               (.dds + .txt wie CECGameUIMan: Breite, Höhe, Zeilen, Spalten, dann die Dateinamen; Symbol i
@@ -20,7 +21,8 @@ extends RefCounted
 #               Qualitätsfarbe, Platz, Werte, Bedingungen (nicht erfüllte rot), Stapel, Verkaufspreis.
 #   Bilder im BBCode: [img] lädt über den ResourceLoader - die Texturen bekommen deshalb einen Pfad unter RUNTIME
 #               (take_over_path, nur im Speicher; der ResourceCache liefert sie)
-#   destroyable(id) false bei proc_type-Bit 0x400 (PROC_NOT_DESTROYABLE); usable(id) Rechtsklick benutzt (Quest-Würfel)
+#   destroyable(id) false bei proc_type-Bit 0x400 (PROC_NOT_DESTROYABLE); usable(id) Rechtsklick benutzt (Quest-Würfel,
+#               Fertigkeits-Gegenstände)
 # Qualitätsfarben wie STRING_TABLE.ITEMQUALITY_COL_0 - 9 (script\global_string.lua,
 # CLuaResource::GetItemQualityColor).
 # ====================================================
@@ -59,8 +61,11 @@ func info(id: int) -> Dictionary:
 		"icon": elements.path_of(int(r.get("file_icon", 0))) if r.has("file_icon") and elements != null else "",
 		"pile": maxi(1, int(r.get("pile_num_max", 1))), "price": int(r.get("shop_price", r.get("price", 0))),
 		"equip": t == "EQUIPMENT_ESSENCE", "models": r.get("models", []),
-		# Quest-Würfel (EXP-Cocktail ...): Rechtsklick benutzt ihn (Z5), Leiste mit progress_desc ("Trinken")
-		"use": t == "TASKDICE_ESSENCE", "use_desc": _clean(r.get("progress_desc", "")), "proc": int(r.get("proc_type", 0))}
+		# Quest-Würfel (EXP-Cocktail ...): Rechtsklick benutzt ihn (Z5), Leiste mit progress_desc ("Trinken");
+		# Fertigkeits-Gegenstände (SKILLMATTER_ESSENCE mit cast_skill, B17): Rechtsklick wirkt ihre Fertigkeit
+		"use": t == "TASKDICE_ESSENCE" or (t == "SKILLMATTER_ESSENCE" and int(r.get("cast_skill", 0)) != 0
+			and int(r.get("id_skill", 0)) != 0),
+		"use_desc": _clean(r.get("progress_desc", "")), "proc": int(r.get("proc_type", 0))}
 	if out["equip"]:
 		out["mask"] = int(r.get("equip_mask", 0))
 		out["lv"] = int(r.get("require_level", 0))
@@ -74,6 +79,11 @@ func info(id: int) -> Dictionary:
 		out["hit"] = int(r.get("attack", 0))
 		out["range"] = float(r.get("attack_range", 0.0))
 		out["action_type"] = int(r.get("action_type", 0))
+	if t == "TASKDICE_ESSENCE" and int(r.get("id_instance", 0)) != 0:
+		# Quest-Würfel mit Ort (B22): Welt, Mitte, halbe Kantenlängen; Hinweis-Modell (file_hint_model) für die Nähe
+		out["at"] = [int(r["id_instance"]), Vector3(float(r["center_x"]), float(r["center_y"]), float(r["center_z"])),
+			Vector3(float(r["half_len_x"]), float(r["half_len_y"]), float(r["half_len_z"]))]
+		out["hint"] = elements.path_of(int(r.get("file_hint_model", 0))) if elements != null else ""
 	_cache[id] = out
 	return out
 

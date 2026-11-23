@@ -8,7 +8,81 @@ an editor plugin that reads the original game data, plus a playable client/serve
 
 ## Patch Notes
 
-### 2026-11-16
+*Click a date to expand.*
+
+<details>
+<summary><b>2026-11-23</b> – standalone Linux client, smooth first skill cast</summary>
+
+**Export**
+- New **EXPORT** dock in the editor with client and server export buttons per platform;
+  *Client Export for Linux* works, the other platforms and the server export follow later.
+- The export converts all game data to Godot resources up front: maps, characters and their skins, weapons,
+  NPC and monster models, effects, item / NPC / quest tables, Lua data, dialogs, texts and fonts
+  (German, English, French), sounds and music.
+- Every step runs in its own Godot process with a memory limit; an interrupted export resumes where it stopped.
+- The exported client runs **without the original game files**: it only reads its own converted data,
+  including a listing of all original file paths.
+- New smoke test for the exported binary (account, login, world, map, character and NPC models)
+  that also checks that no original file is read.
+
+**Skills**
+- The effects and sounds of your own skills (and their buff effects) are loaded while entering the world:
+  no more stutter on the first cast.
+- Fixed: a skill animation kept repeating until the next animation started.
+
+</details>
+
+<details>
+<summary><b>2026-11-22</b> – effects like the original, faster loading</summary>
+
+**Effects**
+- Distortion (warp) layers work like the original and no longer cover the effect
+  (e.g. the mage's fireball and the campfire are no longer pink).
+- Effect parts are drawn in the original order; particle sizes follow the effect's scale
+  (oversized lightning on NPCs fixed).
+- Ambush and similar skills leave their trail in the world instead of sticking to the character.
+- Level-up effect and sound, sparkle on quest items and gathering points, gathering animations
+  (ground gathering plays only the loop, like the original).
+- Dragon boss in s31: its lightning now has the original size (top: before, bottom: now).
+- Warrior skill *Blitzschläger* (German client name): one lightning bolt along the sword instead of
+  four parallel lines (top row: before, lower rows: now).
+- Models from older map imports rebuild their effects in the client, no re-import needed.
+
+<img width="360" alt="Dragon lightning before and after" src="screenshots/dragon-lightning.png" />
+<img width="480" alt="Blitzschläger sword lightning before and after" src="screenshots/lightning-blade.png" />
+
+**Performance**
+- Shared effect shaders: loading the town map s31 with Vulkan went from 15.4 s to 5.5 s.
+- Building collision is precomputed at import (2–3 s → 30 ms per map).
+- Imported scenes are stored in binary form; character models are cached
+  (building a character: 460 ms → under 100 ms).
+
+**World**
+- Auto-pathing steps around thin walls the navigation map does not know
+  (e.g. the booth at the revival point in s9).
+
+</details>
+
+<details>
+<summary><b>2026-11-21</b> – quest fixes, werewolf chain, login timeout</summary>
+
+**Quests**
+- Abandoning quests like the original: right-click menu on a quest, items handed out by the quest are taken back.
+- Quest NPC locations come from the server's spawn data.
+- Werewolf quest chain: the grave quest needs the blood effect first; quests that complete instantly finish
+  as soon as the objective is reached; the "!" turns grey when a quest cannot be accepted yet.
+- Location-bound quest items (e.g. seeds) only work at the right place and show the direction
+  ("The region lies to the north").
+- Skills can summon monsters (e.g. when sowing), taken from the original skill data.
+
+**Network**
+- Werewolf priest / assassin: no more disconnect on the first login (longer connection timeout while loading).
+
+</details>
+
+<details>
+<summary><b>2026-11-16</b> – skills, quests, items, character window, cave collision</summary>
+
 
 **Skills**
 - Crowd control: stun, root, silence, disarm and immunities; the client locks input and greys out icons.
@@ -49,11 +123,14 @@ an editor plugin that reads the original game data, plus a playable client/serve
 **Tests**
 - New test suites for all race/class combinations, quests, items and collision.
 
+</details>
+
 ## Future Plans
 
 **Next fixes**
-- Werewolf priest / assassin: disconnect on the first login.
-- Skill items and the werewolf quest chain.
+- Floating NPC and gathering points on the ground in s31.
+- Werewolf: Moon Mist and transformation; the dark shield skill (cost, cooldown, performance).
+- Buffs and blessings should not run out while offline.
 - Original mouse cursors; the cursor hides and stays in place while turning the camera.
 - Separate quest bag in the inventory.
 - Combat rules: skills need a weapon, no attacking while running, auto-attack on the hotbar.
@@ -61,12 +138,11 @@ an editor plugin that reads the original game data, plus a playable client/serve
 - HUD: EXP numbers, portraits, comparison tooltip for equipment.
 - UI scaling with the window size; loading screen, login window, class icons in the character editor.
 - Models: monster sizes, player eyes, missing textures, helmets.
-- Effects: distortion layers, lightning size, charge effect, loot sparkle, level-up effect, gathering animations.
+- Effects: charge effect.
 - Name plates hidden behind buildings; water shader in s31.
 - Chat channels and tabs (system, world, whisper).
 - Class resource bars (warrior stances, assassin orbs, marksman and bard bars).
-- Performance: convert all game data to Godot resources up front ("Create Godot Client / Server"),
-  less stutter and memory.
+- Performance: server export for Linux, keep more of the frequently used data in memory.
 
 **Skills**
 - Monster skills, more skill effects (shields, cleanses, speed …), talents.
@@ -126,6 +202,9 @@ an editor plugin that reads the original game data, plus a playable client/serve
    client and server files with the scripts in `addons/PWE-Manager/tools/server_data/`
    (usage is described at the top of each script).
 5. Start the server from the SERVER dock, then run the project to log in and play.
+6. Optional: *Client Export for Linux* in the EXPORT dock builds a standalone client in `Export/Client-Linux/`
+   that no longer needs the original files. It contains data converted from your own copy of the game,
+   so do not redistribute it.
 
 ## Testing
 

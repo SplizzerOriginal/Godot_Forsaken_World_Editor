@@ -1,9 +1,12 @@
 # Fertigkeiten und Statuseffekte aus der Editor-Datenbank (skill.sql.2013_11_7, MySQL-Dump "skilldev"
 # der v260-Server-Quellen) -> Server/skill_templates.json und Server/state_templates.json
 # Aufruf: python3 skill_templates.py <skill.sql.2013_11_7> <Ausgabe-Ordner Server/>
-# Dazu jede Fertigkeit, die eine Quest als Belohnung gibt (award skill in <Ausgabe-Ordner>/quest_templates.json,
-# falls vorhanden), auch aus anderen Rollen - z.B. 1889 "初拥" (Rolle 49 任务) der Kindred-Startkette, deren Effekt
-# 914 die Quest 6967 "Erste Begegnung" voraussetzt.
+# Dazu jede Fertigkeit, die eine Quest als Belohnung gibt (award skill / buff in <Ausgabe-Ordner>/quest_templates.json,
+# falls vorhanden) oder ein Fertigkeits-Gegenstand wirkt (cast in item_templates.json), auch aus anderen Rollen - z.B.
+# 1889 "初拥" (Rolle 49 任务) der Kindred-Startkette, deren Effekt 914 die Quest 6967 "Erste Begegnung" voraussetzt,
+# oder 4571 / 4572 der Werwolf-Kette (Effekte 2885 / 2886 für 15791 "Werwolfanbetung").
+# genMob (Wirkungsart 78 "Monster erzeugen"): die Werte stehen nicht im Effekt, sondern je Fertigkeit in der Tabelle skillmob
+# (mob, z.B. 4575 aus 15411 "Segen der Erde (Säen)": 1 Setzling 43954 für 600 s an der Figur).
 # Der Dump enthält die Tabellen, aus denen wskill/gen (Generator.java, SkillStub.java, StateFilter.java)
 # den C++-Code der Skill-Bibliothek erzeugt hat. Werte sind Formeln (Text, siehe game/server/skill_expr.gd),
 # verschachtelte Felder Java-Serialisierung (AttackWay, ProcedureVO, SkillStateParam, StateEffect).
@@ -225,7 +228,21 @@ def bits(s):
 	return int(s[::-1], 2) if s and set(s) <= {'0', '1'} else 0
 
 
-def skill_entry(s, roles):
+def mob_entry(m):
+	"""genMob (Wirkungsart 78, Tabelle skillmob wie GetGenMobId / Mount / Time und mobparam der erzeugten Skill-Klassen):
+	Monster-Vorlage, Anzahl (höchstens 10), Lebensdauer s, Lage pos_type 0 neben dem Träger / 1 an pos / 2 Träger - pos."""
+	if m is None or num(m['mob_id']) <= 0 or num(m['mob_mount']) <= 0:
+		return None
+	e = {'id': num(m['mob_id']), 'num': num(m['mob_mount']), 'time': num(m['mob_time']),
+		'pos': [float(num(m[k])) for k in ('mob_posx', 'mob_posy', 'mob_posz')], 'pos_type': num(m['pos_type'])}
+	if num(m['mob_vid']) > 0:
+		e['vid'] = num(m['mob_vid'])
+	if text(m['mob_name']):
+		e['name'] = text(m['mob_name'])
+	return e
+
+
+def skill_entry(s, roles, mobs={}):
 	aw = java(s['attackway']) or {}
 	approach = num(aw.get('approach'), -1)
 	radius = text(aw.get('radious01'))
@@ -294,6 +311,9 @@ def skill_entry(s, roles):
 		'range': {'approach': approach, 'angle': text(aw.get('angle')), 'effect_dist': text(aw.get('attackdistance00')),
 			'attack_dist': attack_dist, 'kill': text(aw.get('killnum')), 'radius': radius},
 		'procs': procs, 'actions': actions, 'talents': talents, 'states': states}
+	mob = mob_entry(mobs.get(num(s['id'])))
+	if mob is not None:
+		e['mob'] = mob
 	return e
 
 
@@ -320,11 +340,26 @@ def state_entry(s):
 
 
 def quest_skills(path):
-	"""IDs der Fertigkeiten, die Quests als Belohnung geben (leer ohne quest_templates.json)."""
+	"""IDs der Fertigkeiten, die Quests als Belohnung geben: lernen (award skill) oder auf die Figur wirken (award buff,
+	DeliverBuff, z.B. 4571 der Werwolf-Kette); leer ohne quest_templates.json."""
 	if not os.path.exists(path):
 		return set()
 	tasks = json.load(open(path, encoding='utf-8')).get('tasks', {})
-	return {int(q['award']['skill'][0]) for q in tasks.values() if q.get('award', {}).get('skill')}
+	out = set()
+	for q in tasks.values():
+		a = q.get('award', {})
+		for k in ('skill', 'buff'):
+			if a.get(k):
+				out.add(int(a[k][0]))
+	return out
+
+
+def item_skills(path):
+	"""IDs der Fertigkeiten, die Fertigkeits-Gegenstände wirken (item_templates.json cast, z.B. 44134 -> 4572)."""
+	if not os.path.exists(path):
+		return set()
+	items = json.load(open(path, encoding='utf-8')).get('items', {})
+	return {int(i['cast'][0]) for i in items.values() if i.get('cast')}
 
 
 def main():
@@ -333,8 +368,9 @@ def main():
 	roles = {num(r['id']): {'name': text(r['name']), 'race': num(r['race']), 'class': num(r['occupation'])}
 		for r in table(dump, 'role')[1]}
 	_, skill_rows = table(dump, 'skill')
-	awarded = quest_skills(os.path.join(outdir, 'quest_templates.json'))
-	skills = [skill_entry(s, roles) for s in skill_rows if num(s['roleid']) in ROLES or num(s['id']) in awarded]
+	awarded = quest_skills(os.path.join(outdir, 'quest_templates.json')) | item_skills(os.path.join(outdir, 'item_templates.json'))
+	mobs = {num(m['id']): m for m in table(dump, 'skillmob')[1]}
+	skills = [skill_entry(s, roles, mobs) for s in skill_rows if num(s['roleid']) in ROLES or num(s['id']) in awarded]
 	skills.sort(key=lambda e: e['id'])
 	_, state_rows = table(dump, 'state')
 	states = sorted((state_entry(s) for s in state_rows), key=lambda e: e['id'])
@@ -350,7 +386,8 @@ def main():
 	note = ('Formeln als Text (game/server/skill_expr.gd); tN = talent(N+1); procs = Prozeduren '
 		'(1 Zaubern, 2 Ausführen ...); states: slot 1-4 / 9-14 Ziel, 5-8 / 15-20 selbst (self), data[j] -> '
 		'j-te Wirkung des Effekts, time ms, chance %; actions: Index (0-9 zu Fuß, 10-19 beritten) -> Aktion '
-		'ab diesem Index; range.approach = Zielart (skill.h RANGE_*)')
+		'ab diesem Index; range.approach = Zielart (skill.h RANGE_*); mob = genMob (Tabelle skillmob): id Monster, '
+		'num Anzahl, time Lebensdauer s, pos [x, y, z], pos_type 0 neben dem Träger / 1 an pos / 2 Träger - pos')
 	json.dump({'source': os.path.basename(src) + ' (Tabelle skill, Rollen %s)' % sorted(ROLES), 'note': note,
 		'roles': skill_roles, 'skills': skills},
 		open(os.path.join(outdir, 'skill_templates.json'), 'w'), ensure_ascii=False, separators=(',', ':'))

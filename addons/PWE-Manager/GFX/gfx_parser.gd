@@ -70,6 +70,70 @@ static func release_decoder() -> void:
 # Ein Material-Uniform, kein Instanz-Uniform: jede Instanz mit Instanz-Uniforms belegt 16 Plätze im
 # globalen Puffer (Standard 65536), Maps mit tausenden GFX liefen über ("Too many instances using
 # shader instance variables"). Header und Container haben ohnehin eigene Material-Kopien je GFX.
+# ====================================================
+# GEMEINSAMER SHADER-VORRAT (Performance-Fahrplan P1)
+# Jedes Shader-Objekt kostet beim ersten Einhängen eines Materials eigene Arbeit (Vulkan ~12 ms je Objekt, auch wenn ein
+# anderes Objekt denselben Text schon übersetzt hat; GL ~7 ms), ein geteiltes Objekt nichts. Die GFX-Texte sind fast alle
+# im Aufbau verschieden (s9 + s31 + 110 NPC-Modelle: 446 Texte), aber dieselbe GFX steckt in vielen Szenen -> 1.259
+# Objekte. Darum: gleicher Text = ein Objekt - beim Bauen (shared_shader) und beim Laden importierter Szenen, bevor sie
+# eingehängt werden (share_scene). Kein Code darf den Text eines Shaders aus dem Vorrat nachträglich ändern.
+# ====================================================
+static var _shader_pool = {} # Text -> Shader
+
+# Shader mit diesem Text aus dem Vorrat (neu angelegt, wenn es ihn noch nicht gibt)
+static func shared_shader(code: String) -> Shader:
+	var sh = _shader_pool.get(code)
+	if sh == null:
+		sh = Shader.new()
+		sh.code = code
+		_shader_pool[code] = sh
+	return sh
+
+# Shader eines Materials gegen das Objekt aus dem Vorrat tauschen (gleicher Text) -> true wenn getauscht; das erste Objekt
+# eines Texts wird selbst zum Vorrat
+static func share_material(m: Material) -> bool:
+	var sm = m as ShaderMaterial
+	if sm == null or sm.shader == null:
+		return false
+	var code = sm.shader.code
+	var pooled = _shader_pool.get(code)
+	if pooled == null:
+		_shader_pool[code] = sm.shader
+		return false
+	if pooled == sm.shader:
+		return false
+	sm.shader = pooled
+	return true
+
+# Geladene Szene (vor dem Instanzieren): Materialien aller Knoten und eingebetteten Unter-Szenen auf den Vorrat umstellen,
+# ohne zu instanzieren (Szenen-Zustand: die Material-Ressourcen dort sind dieselben, die jede Instanz bekommt). Jede Szene
+# nur einmal (Meta). -> Anzahl getauschter Shader
+static func share_scene(packed: PackedScene) -> int:
+	if packed == null or packed.has_meta(SHARED_META):
+		return 0
+	packed.set_meta(SHARED_META, true)
+	var st = packed.get_state()
+	var n = 0
+	for i in st.get_node_count():
+		var sub = st.get_node_instance(i)
+		if sub != null:
+			n += share_scene(sub)
+		for j in st.get_node_property_count(i):
+			var v = st.get_node_property_value(i, j)
+			if v is ShaderMaterial:
+				n += 1 if share_material(v) else 0
+			elif v is Mesh:
+				for k in (v as Mesh).get_surface_count():
+					n += 1 if share_material((v as Mesh).surface_get_material(k)) else 0
+	return n
+
+# Vorrat leeren (nach einem Import im Editor; zur Laufzeit bleibt er für die ganze Sitzung)
+static func release_shader_pool() -> void:
+	_shader_pool.clear()
+
+static func shader_pool_size() -> int:
+	return _shader_pool.size()
+
 static func add_gfx_alpha(code: String) -> String:
 	var at = code.find("void fragment()")
 	if at < 0 or "GFX_Alpha" in code:
@@ -80,6 +144,75 @@ static func add_gfx_alpha(code: String) -> String:
 		return code
 	code = code.substr(0, end + 1) + "\tALPHA *= GFX_Alpha;\n" + code.substr(end + 1)
 	return code.substr(0, at) + "// GFX-Alpha (Header / Container), je GFX gesetzt\nuniform float GFX_Alpha = 1.0;\n\n" + code.substr(at)
+
+# Warp (Hitzeflimmern, B10) wie das Original (CECFullGlowRender::DoWarps mit dem spacewarp-Pixelshader der Spieldaten): die
+# Textur des Elements ist eine Verschiebungs-Karte - (rot, grün) * 2 - 1, x gespiegelt, mal Alpha des Elements bzw. Partikels
+# (A3DWARPVERTEX u3 / v3) mal Alpha der Textur verschieben die Bildkoordinaten; unter 5 % Textur-Alpha nichts (texkill); gezeigt
+# wird nur das verschobene Bild, deckend, nie die Farbe der Textur (sonst der rosa Feuerball). Das Original verzerrt das fertige
+# Bild samt aller GFX; Godots Bildschirm-Textur enthält nur das Undurchsichtige - deshalb zeichnen Warp-Elemente zuerst
+# (WARP_PRIORITY) und die übrigen GFX darüber, sonst deckte der Warp sie mit dem bloßen Hintergrund zu (das Lagerfeuer).
+const WARP_PRIORITY = Material.RENDER_PRIORITY_MIN
+const SHARED_META = "shader_pool_shared" # an einer PackedScene: share_scene ist durch
+const WARP_UNIFORM = "uniform sampler2D screen_texture : hint_screen_texture, filter_linear_mipmap;\n"
+
+# Zeichenreihenfolge der Elemente (B10) wie A3DGFXRenderSlotMan::Render: die Render-Slots laufen in der Reihenfolge ihrer
+# Anmeldung (fortlaufender Schlüssel m_dwCurIndex, beim Laden einer GFX = Reihenfolge der Elemente in der Datei), die Ebenen
+# RenderLayer BASE4 ... BASE1 davor, FRONT1 ... FRONT4 danach. "Priority" ist im Original keine Reihenfolge, sondern die
+# Detailstufe (A3DGFXEx::Render überspringt Elemente über der Stufe des GFX-Managers, Standard 4 = alle) - als Reihenfolge
+# gelesen lag z.B. der Kern des Feuerballs (letztes Element, Priority 0) unter seinen rosa Wolken (Priority 1 / 3)
+const LAYER_RANK = {0: 0, 1: -1, 2: 1, 3: -2, 4: 2, 5: -3, 6: 3, 7: -4, 8: 4} # GFX_RENDER_LAYER_* -> Rang
+const ORDER_STEP = 25 # Plätze je Ebene (weitere Elemente teilen sich den letzten)
+
+static func element_priority(element: Node, parsed_data: Dictionary) -> int:
+	var idx = element.get_index() if element != null and element.get_parent() != null else 0
+	var name = str(element.name) if element != null else ""
+	if name.begins_with("Element_"):
+		var num = name.substr(8).get_slice("_", 0)
+		if num.is_valid_int():
+			idx = int(num) - 1
+	var layer = int(str(parsed_data.get("RenderLayer", "0")).strip_edges())
+	return clampi(int(LAYER_RANK.get(layer, 0)) * ORDER_STEP + clampi(idx, 0, ORDER_STEP - 1), WARP_PRIORITY + 1,
+		Material.RENDER_PRIORITY_MAX)
+
+# Lage-Geschichte der GFX in der Welt (B10, gfx_world_trail.gd füllt sie je Bild): Uniforms und trail_at(Alter in s) ->
+# Drehung (Quaternion) und Verschiebung der Lage von damals im Raum von jetzt; TrailCount 0 = ohne Geschichte (feste GFX).
+# Genutzt von ungebundenen Partikeln (create_id_120: IsBind 0) und Spuren (create_id_110: Bind 0, wie A3DTrail mit
+# Weltpositionen - z.B. der Bogen hinter der Klinge beim Blitzschläger des Kriegers)
+const TRAIL_SAMPLES = 16
+
+static func trail_code() -> String:
+	var n = str(TRAIL_SAMPLES)
+	var c = "uniform int TrailCount = 0;\nuniform vec4 TrailPos[" + n + "];\nuniform vec4 TrailRot[" + n + "];\n\n"
+	c += "vec3 trail_qrot(vec4 q, vec3 v) {\n\treturn v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);\n}\n"
+	c += "// Lage der GFX vor age s im Raum von jetzt (Lage-Geschichte, sonst unverändert)\n"
+	c += "vec4 trail_at(float age, out vec3 off) {\n"
+	c += "\toff = vec3(0.0);\n"
+	c += "\tif (TrailCount <= 0) return vec4(0.0, 0.0, 0.0, 1.0);\n"
+	c += "\tint last = min(TrailCount, " + n + ") - 1;\n"
+	c += "\tif (age <= TrailPos[0].w) { off = TrailPos[0].xyz; return TrailRot[0]; }\n"
+	c += "\tfor (int k = 1; k < " + n + "; k++) {\n"
+	c += "\t\tif (k > last) break;\n"
+	c += "\t\tif (age <= TrailPos[k].w) {\n"
+	c += "\t\t\tfloat f = (age - TrailPos[k - 1].w) / max(0.0001, TrailPos[k].w - TrailPos[k - 1].w);\n"
+	c += "\t\t\toff = mix(TrailPos[k - 1].xyz, TrailPos[k].xyz, f);\n"
+	c += "\t\t\tvec4 q1 = TrailRot[k];\n"
+	c += "\t\t\tif (dot(TrailRot[k - 1], q1) < 0.0) q1 = -q1;\n"
+	c += "\t\t\treturn normalize(mix(TrailRot[k - 1], q1, f));\n"
+	c += "\t\t}\n"
+	c += "\t}\n"
+	c += "\toff = TrailPos[last].xyz;\n"
+	c += "\treturn TrailRot[last];\n"
+	c += "}\n\n"
+	return c
+
+# Fragment-Zeilen des Warps: tex = Texturfarbe (vec4), alpha = Ausdruck für das Alpha des Elements / Partikels
+static func warp_fragment(tex: String, alpha: String, indent: String = "\t") -> String:
+	var s = indent + "// --- WARP wie das Original: Textur = Verschiebung, gezeigt nur das verschobene Bild ---\n"
+	s += indent + "if (%s.a < 0.05) {\n%s\tdiscard;\n%s}\n" % [tex, indent, indent]
+	s += indent + "vec2 warp_off = vec2(1.0 - 2.0 * %s.r, %s.g * 2.0 - 1.0) * clamp(%s, 0.0, 1.0) * %s.a;\n" % [tex, tex, alpha, tex]
+	s += indent + "ALBEDO = textureLod(screen_texture, SCREEN_UV + warp_off, 0.0).rgb;\n" # ohne Mip-Wahl: keine Ränder am discard
+	s += indent + "ALPHA = 1.0;\n"
+	return s
 
 # Alpha der ganzen GFX an einem Node: GFX_Alpha, sonst transparency (StandardMaterial / ältere Shader)
 static func set_gfx_alpha(g: GeometryInstance3D, a: float) -> void:

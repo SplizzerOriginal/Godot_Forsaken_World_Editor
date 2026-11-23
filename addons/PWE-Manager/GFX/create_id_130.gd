@@ -50,7 +50,7 @@ func execute(root_node: Node):
 		push_warning("Keine Nodes mit der ID " + _element_id() + " gefunden!")
 		return
 
-	var undo_redo = EditorInterface.get_editor_undo_redo()
+	var undo_redo = Engine.get_singleton(&"EditorInterface").get_editor_undo_redo() # nur im Editor (Klasse fehlt im Export)
 	undo_redo.create_action("Create " + _node_name() + " for ID_" + _element_id())
 
 	# 1. Nodes nach Parent (Header) gruppieren
@@ -154,7 +154,7 @@ func _get_node_params(child: Node) -> Dictionary:
 		if constants.has("PARAMS"): return constants["PARAMS"]
 	return {}
 
-func _create_element_node(parent_node: Node3D, root_node: Node, undo_redo: EditorUndoRedoManager, max_group_time: float):
+func _create_element_node(parent_node: Node3D, root_node: Node, undo_redo, max_group_time: float):
 	if parent_node.has_node(NodePath(_node_name())):
 		return
 

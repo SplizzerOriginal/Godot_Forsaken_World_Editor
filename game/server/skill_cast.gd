@@ -34,6 +34,9 @@ extends RefCounted
 # läuft der Zaubernde in der Zeit der Prozedur bis vor das Ziel (Meldung skill_move an alle in Sicht); MOVE des
 # Clients bis kurz danach zählt nur als Drehung (world.gd dash_until).
 # Abklingzeiten nur im Speicher (gehen beim Verlassen der Welt verloren).
+# Fertigkeits-Gegenstände (cast_item, Bug-Fahrplan B17): ein Gegenstand wirkt seine Fertigkeit wie ein Einsetzen, auch
+# ungelernt (z.B. 44134 "Blut des Werwolfgottes" -> 4572, 0,5 s, Effekt 2886); Effekt-Belohnungen der Quests
+# (deliver_buff, DeliverBuff): die Effekte der Fertigkeit sofort auf die Figur (z.B. 15790 -> 4571, Effekt 2885).
 # Passiv (use 6, F7): nicht einsetzbar (SKILL_PASSIVE), Dauer-Effekte über apply_passive(s). Schalter (use 7,
 # SwitchOn / TrySwitchOff): einsetzen wie eine Stärkung; seine Effekte auf der eigenen Figur halten ihn an (buffs.gd
 # switch, Meldung skill_switch); erneut eingesetzt schaltet er aus, ohne Kosten und auch in der Abklingzeit.
@@ -65,6 +68,7 @@ var log_line: Callable
 var combat # combat.gd
 var buffs = null # buffs.gd: Statuseffekte der Fertigkeit
 var stats_push: Callable # (peer, p) -> Meldung stats
+var item_used: Callable # (peer, p, pos, id): Fertigkeits-Gegenstand gewirkt -> ein Stück weg (inventory.gd use_up)
 var templates = {} # ID -> Fertigkeit
 
 
@@ -106,7 +110,19 @@ func info(p: Dictionary, id: int) -> Dictionary:
 		"auto": int(sk["autoattack"]) == 0, "usable": usable(sk), "dizzy": _flag(sk, "dizzy_usable", ctx, 0),
 		"handfree": _flag(sk, "handfree_usable", ctx, 1), "bless": int(sk["type"]) == 2,
 		"self": int(sk["type"]) == 2 and int(sk["range"]["approach"]) in [5, 8], "move": int(sk["move_mode"]),
-		"passive": int(sk["use"]) == 6, "switch": int(sk["use"]) == 7}
+		"passive": int(sk["use"]) == 6, "switch": int(sk["use"]) == 7, "lights": lights_of(sk)}
+
+# GFX der Statuseffekte, die eine Fertigkeit auslösen kann (light, buff_gfx.lua) - der Client lädt sie vorab (Performance-
+# Fahrplan P3: sonst ruckelt das erste Erscheinen, z.B. Gebet 1113 -> 16)
+func lights_of(sk: Dictionary) -> Array:
+	var out = []
+	if buffs == null:
+		return out
+	for e in sk.get("states", []):
+		var l = int(buffs.states.get(int(e["id"]), {}).get("light", -1))
+		if l >= 0 and not l in out:
+			out.append(l)
+	return out
 
 func infos(p: Dictionary) -> Dictionary:
 	var out = {}
@@ -187,6 +203,14 @@ func cast(peer: int, p: Dictionary, id, target) -> Array:
 	var tr = _resolve(p, sk, target)
 	if tr.is_empty():
 		return [Proto.Code.NO_TARGET, {}]
+	return _begin(peer, p, sk, level, ctx, tr, {})
+
+# Zaubern beginnen (nach den Prüfungen von cast bzw. cast_item): Mana, Weite, dann die erste Prozedur.
+# extra: z.B. {"item": {...}} für einen Fertigkeits-Gegenstand (_perform verbraucht ihn)
+func _begin(peer: int, p: Dictionary, sk: Dictionary, level: int, ctx: Dictionary, tr: Array, extra: Dictionary) -> Array:
+	var id = int(sk["id"])
+	var now = Time.get_ticks_msec()
+	var target: int
 	var cost = _mp(sk, ctx)
 	if int(p["mp"]) < cost:
 		return [Proto.Code.NO_MANA, {}]
@@ -203,6 +227,7 @@ func cast(peer: int, p: Dictionary, id, target) -> Array:
 	var total = total_time(sk, ctx)
 	var c = {"id": id, "level": level, "target": target, "kind": tr[0], "start": now, "pos": p["pos"], "idx": 0, "ctx": ctx,
 		"cost": cost, "cool": maxi(0, int(Expr.value(sk["cool"], ctx))), "done": false}
+	c.merge(extra)
 	for k in DEFAULTS:
 		ctx[k] = DEFAULTS[k]
 	p["cast"] = c
@@ -212,10 +237,62 @@ func cast(peer: int, p: Dictionary, id, target) -> Array:
 		a["next"] = maxf(float(a.get("next", 0.0)), (now + total) / 1000.0)
 	var act = act_of(sk, ctx)
 	_to_viewers(p, p["pos"], "skill_start", {"src": p["id"], "id": id, "dst": target, "time": total, "act": act}, false)
-	log_line.call("Fertigkeit: %s setzt %d (%s) auf %d ein, %d ms" % [p["name"], id, sk["name"], target, total])
+	log_line.call("Fertigkeit: %s setzt %d (%s) auf %d ein, %d ms%s" % [p["name"], id, sk["name"], target, total,
+		" (Gegenstand %d)" % int(c["item"]["id"]) if c.has("item") else ""])
 	if c["done"]:
 		_perform(peer, p, sk, c, nm, o)
-	return [Proto.Code.OK, {"id": id, "time": total}]
+	return [Proto.Code.OK, {"id": id, "time": total, "act": act}]
+
+# Fertigkeits-Gegenstand (SKILLMATTER_ESSENCE, inventory.gd use): wirkt seine Fertigkeit (cast [ID, Stufe]) wie
+# CECHostPlayer::UseItem -> CastSkill, ohne dass die Figur sie kennt. Nur Stärkungen (type 2): Ziel ist die eigene Figur
+# bzw. der gewählte Spieler wie beim Einsetzen. item {pos, id, keep, cool}: _perform verbraucht ein Stück (ohne keep,
+# item_used) und startet die Abklingzeit des Gegenstands (cool ms). -> [Code, {id (Gegenstand), pos, skill, time ms, act}]
+func cast_item(peer: int, p: Dictionary, id: int, level: int, item: Dictionary, target: int = 0) -> Array:
+	if p.get("dead", false):
+		return [Proto.Code.YOU_ARE_DEAD, {}]
+	var sk: Dictionary = templates.get(id, {})
+	if sk.is_empty() or int(sk["type"]) != 2 or sk["procs"].is_empty():
+		return [Proto.Code.ITEM_NOT_USABLE, {}]
+	if p.has("cast"):
+		return [Proto.Code.SKILL_BUSY, {}]
+	var now = Time.get_ticks_msec()
+	if int(p.get("item_cooldowns", {}).get(int(item["id"]), 0)) > now:
+		return [Proto.Code.SKILL_COOLDOWN, {}]
+	var ctx = _ctx(p, sk, maxi(1, level))
+	if Buffs.sealed(p, "silent") and not _flag(sk, "dizzy_usable", ctx, 0):
+		return [Proto.Code.SKILL_SEALED, {}]
+	var r = _begin(peer, p, sk, maxi(1, level), ctx, _resolve(p, sk, target if target != 0 else int(p["id"])), {"item": item})
+	if r[0] == Proto.Code.OK: # Antwort wie item_use: id = Gegenstand, dazu skill, time (ms), act
+		r[1]["skill"] = id
+		r[1]["id"] = int(item["id"])
+		r[1]["pos"] = int(item["pos"])
+	return r
+
+# Effekt als Quest-Belohnung (AWARD_DATA m_lBuffId / m_lBuffLev, TaskInterface::DeliverBuff): die Effekte der Fertigkeit
+# auf ihrer Stufe auf die Figur, ohne Zaubern, Kosten und Aktion (alle Plätze; ohne Erfolgs-Formel 100 %), z.B. 15790
+# "Wunsch der Ahnen" -> 4571 mit Effekt 2885 (20 s) der Werwolf-Kette. -> Anzahl angelegter Effekte
+func deliver_buff(p: Dictionary, id: int, level: int) -> int:
+	var sk: Dictionary = templates.get(id, {})
+	if sk.is_empty() or buffs == null:
+		return 0
+	var ctx = _ctx(p, sk, maxi(1, level))
+	var n = 0
+	for e in sk["states"]:
+		var f = str(e["chance"]).strip_edges()
+		var chance = 100 if f == "" else int(Expr.value(f, ctx, 0))
+		if chance == 0:
+			continue
+		var values = []
+		for x in e["data"]:
+			values.append(float(Expr.value(str(x), ctx, 0.0)) if str(x).strip_edges() != "" else 0.0)
+		if buffs.apply(p, p["map"], int(e["id"]), values, int(Expr.value(str(e["time"]), ctx, 0)), chance, p, false, _mob(sk)):
+			n += 1
+	log_line.call("Fertigkeit: %s bekommt %d (%s) als Belohnung, %d Effekt(e)" % [p["name"], id, sk["name"], n])
+	return n
+
+# genMob-Werte der Fertigkeit für ihre Effekte (buffs.gd _gen_mob; Tabelle skillmob wie GetGenMobParam) -> extra
+static func _mob(sk: Dictionary) -> Dictionary:
+	return {"mob": sk["mob"]} if sk.has("mob") else {}
 
 func cancel_request(peer: int, p: Dictionary) -> Array:
 	cancel(peer, p, false, "Anfrage")
@@ -305,6 +382,14 @@ func _run_proc(sk: Dictionary, c: Dictionary, idx: int) -> int:
 func _perform(peer: int, p: Dictionary, sk: Dictionary, c: Dictionary, nm, o) -> void:
 	c["performed"] = true
 	var now = Time.get_ticks_msec()
+	if c.has("item"): # Fertigkeits-Gegenstand: Abklingzeit, ein Stück weg (ohne keep / permenent)
+		var it: Dictionary = c["item"]
+		if int(it.get("cool", 0)) > 0:
+			if not p.has("item_cooldowns"):
+				p["item_cooldowns"] = {}
+			p["item_cooldowns"][int(it["id"])] = now + int(it["cool"])
+		if not it.get("keep", false) and item_used.is_valid():
+			item_used.call(peer, p, int(it["pos"]), int(it["id"]))
 	p["mp"] = maxi(0, int(p["mp"]) - int(c["cost"]))
 	if int(c["cool"]) > 0:
 		if not p.has("cooldowns"):
@@ -368,6 +453,7 @@ func _states(p: Dictionary, target: Dictionary, sk: Dictionary, ctx: Dictionary,
 			values.append(float(Expr.value(str(x), ctx, 0.0)) if str(x).strip_edges() != "" else 0.0)
 		# Schalter: seine Effekte auf der eigenen Figur halten ihn an (StateFilter SWITCH_BUFF)
 		var extra = {"switch": int(sk["id"])} if int(sk["use"]) == 7 and target == p else {}
+		extra.merge(_mob(sk))
 		buffs.apply(target, p["map"], int(e["id"]), values, int(Expr.value(str(e["time"]), ctx, 0)), chance, p, crit, extra)
 
 

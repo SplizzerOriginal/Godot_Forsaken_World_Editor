@@ -25,6 +25,12 @@ extends RefCounted
 # Benutzen (use, Z5): Quest-Würfel (dice, z.B. EXP-Cocktail) in der Tasche; die Quest der Liste (nach
 # Wahrscheinlichkeit) muss vergebbar sein (quests.gd can_deliver, z.B. Stufe 20 für den Gelben Cocktail); nach use_time s
 # (time_intonate, "Trinken") ein Stück weg und die Quest vergeben und erfüllt (quests.gd dice: EXP); Bewegen bricht ab.
+# Würfel mit Ort (at [Welt, Mitte x / y / z, halbe Kantenlänge x / y / z], B22, wie item_taskdice::OnUse): nur in dieser Welt
+# (map_tags: Map -> Welt-Nummer aus maps.json) und Box, beim Start und am Ende geprüft, sonst ITEM_NOT_USABLE (der Client
+# prüft vorher selbst und nennt die Richtung, wie CECHostPlayer::UseItemInPack) - z.B. der Samen 43953 in s31.
+# Fertigkeits-Gegenstände (cast, Bug-Fahrplan B17, z.B. 44134 "Blut des Werwolfgottes"): Stufe lv, dann wirkt die
+# Fertigkeit wie ein Einsetzen (skill_cast.gd cast_item, Zauberbalken, skill_end); ohne keep (permenent) nimmt die
+# Wirkung ein Stück weg (use_up).
 # Zerstören (destroy, wie c2s_CmdDestroyItem): der ganze Stapel an pos, wenn dort id liegt und die Vorlage zerstörbar ist
 # (proc ohne PROC_NOT_DESTROYABLE 0x400, z.B. die Quest-Fackeln nicht).
 # Meldungen: inventory {size, bag: [[Platz, ID, Anzahl]], equip: [[Platz, ID]]}, use_end {pos, id, ok}, gather_end {id, ok,
@@ -46,9 +52,11 @@ var net
 var log_line: Callable
 var stats # stats.gd
 var quests = null # quests.gd (Sammeln für Quests, Gegenstands-Ziele)
+var casting = null # skill_cast.gd (Fertigkeits-Gegenstände: cast_item)
 var items = {} # ID -> Vorlage
 var mines = {} # ID -> Sammelpunkt-Vorlage
 var on_equip_changed: Callable # (peer, p): andere Spieler informieren (world.gd)
+var map_tags = {} # Map -> Welt-Nummer (maps.json tag, setzt der Server; sonst "s<Nummer>")
 
 
 func _init(p_db, p_net, p_log: Callable, p_stats) -> void:
@@ -425,7 +433,17 @@ func use(peer: int, p: Dictionary, pos: int) -> Array:
 	if e == null:
 		return [Proto.Code.ITEM_INVALID, {}]
 	var t = item(int(e[0]))
+	if t.has("cast"): # Fertigkeits-Gegenstand (B17): die Fertigkeit wirkt wie beim Einsetzen (skill_cast.gd cast_item)
+		if casting == null:
+			return [Proto.Code.ITEM_NOT_USABLE, {}]
+		if int(t.get("lv", 0)) > int(p["level"]):
+			return [Proto.Code.SKILL_LEVEL_LOW, {}]
+		var c: Array = t["cast"]
+		return casting.cast_item(peer, p, int(c[0]), int(c[1]), {"pos": pos, "id": int(e[0]), "keep": t.get("keep", false),
+			"cool": int(t.get("cool", 0))})
 	if not t.has("dice") or quests == null:
+		return [Proto.Code.ITEM_NOT_USABLE, {}]
+	if not place_ok(p, t):
 		return [Proto.Code.ITEM_NOT_USABLE, {}]
 	var quest = _roll(t["dice"])
 	var code = quests.can_deliver(p, quest)
@@ -436,6 +454,33 @@ func use(peer: int, p: Dictionary, pos: int) -> Array:
 	if secs == 0:
 		_use_done(peer, p)
 	return [Proto.Code.OK, {"pos": pos, "id": int(e[0]), "time": secs}]
+
+# Ort eines Quest-Würfels (at): Welt der Map und Box um die Mitte; ohne at überall
+func place_ok(p: Dictionary, t: Dictionary) -> bool:
+	var at: Array = t.get("at", [])
+	if at.size() < 7:
+		return true
+	var pos: Vector3 = p["pos"]
+	return world_tag(str(p.get("map", ""))) == int(at[0]) and absf(pos.x - float(at[1])) <= float(at[4]) \
+		and absf(pos.y - float(at[2])) <= float(at[5]) and absf(pos.z - float(at[3])) <= float(at[6])
+
+func world_tag(map_name: String) -> int:
+	if map_tags.has(map_name):
+		return int(map_tags[map_name])
+	return map_name.substr(1).to_int() if map_name.begins_with("s") and map_name.substr(1).is_valid_int() else -1
+
+# Fertigkeits-Gegenstand gewirkt (skill_cast.gd item_used): ein Stück weg, wenn an pos noch id liegt
+func use_up(peer: int, p: Dictionary, pos: int, id: int) -> void:
+	var e = p["bag"].get(pos)
+	if e == null or int(e[0]) != id:
+		return
+	e[1] = int(e[1]) - 1
+	if int(e[1]) <= 0:
+		p["bag"].erase(pos)
+		_delete(p, BAG, pos)
+	else:
+		_save(p, BAG, pos, id, int(e[1]))
+	push(peer, p)
 
 func cancel_use(peer: int, p: Dictionary, notify: bool) -> void:
 	var u: Dictionary = p.get("use", {})
@@ -457,7 +502,8 @@ func _use_done(peer: int, p: Dictionary) -> void:
 	var u: Dictionary = p["use"]
 	p["use"] = {}
 	var e = p["bag"].get(int(u["pos"]))
-	var ok = e != null and int(e[0]) == int(u["id"]) and quests.can_deliver(p, int(u["quest"])) == Proto.Code.OK
+	var ok = e != null and int(e[0]) == int(u["id"]) and place_ok(p, item(int(u["id"]))) \
+		and quests.can_deliver(p, int(u["quest"])) == Proto.Code.OK
 	if ok:
 		e[1] = int(e[1]) - 1
 		if int(e[1]) <= 0:

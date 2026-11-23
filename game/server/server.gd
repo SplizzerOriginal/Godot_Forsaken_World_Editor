@@ -8,7 +8,8 @@ extends Node
 # bzw. als Export mit "dedicated_server". Die Leiste SERVER des Plugins startet ihn so.
 # Einstellungen: Abschnitt [server] in user://settings.cfg, Kommandozeile geht vor.
 # Dateien im Ordner --dir (Standard user://server/; die Tests nehmen einen eigenen):
-#   server.log, status.json   Log und Zustand (Spieler online, Last) für die Leiste SERVER
+#   server.log, status.json   Log und Zustand (Spieler online, Last) für die Leiste SERVER; die Logs der letzten
+#                             Läufe bleiben als server.1.log (voriger) ... server.5.log
 #   stop                      legt die Leiste an: Server meldet "server_closing" und endet sauber
 #   game.db                   Konten, Figuren ... (db.gd, schema.gd, accounts.gd)
 #   dtls.key, dtls.crt        mit --dtls: Schlüssel und selbst signiertes Zertifikat (einmal erzeugt)
@@ -25,6 +26,8 @@ extends Node
 # Server/skill_templates.json, Formeln skill_expr.gd), Statuseffekte buffs.gd (Server/state_templates.json).
 # Testbefehle (debug_state: Effekt anlegen, debug_skill: Fertigkeit lernen) nur mit der Einstellung debug_commands
 # (--debug_commands, Testserver).
+# Netz-Zeitlimit je Verbindung: net_timeout s (Vorgabe 30) ohne Bestätigung, bis eine Verbindung als weg gilt (ENet
+# selbst nähme 5 s - ein Client, der eine große Map lädt, flog dann im Ladebildschirm hinaus, Bug-Fahrplan B16).
 # ====================================================
 
 const Proto = preload("../common/protocol.gd")
@@ -48,6 +51,7 @@ const POLL_SECONDS = 0.5
 const MAX_REQUESTS_PER_SECOND = 60
 const LOAD_WINDOW = 10.0 # s je Messung der Last
 const LOAD_LOG = 60.0 # s zwischen den Last-Zeilen im Log
+const LOG_KEEP = 5 # alte Logs server.1.log ... server.5.log
 # Anfragen, die ohne "hello" bzw. ohne Anmeldung erlaubt sind
 const BEFORE_HELLO = ["hello", "ping"]
 const BEFORE_LOGIN = ["hello", "ping", "register", "login"]
@@ -94,6 +98,7 @@ func _ready() -> void:
 	stop_file = dir + "/stop"
 	DirAccess.make_dir_recursive_absolute(dir)
 	DirAccess.remove_absolute(stop_file)
+	_rotate_logs()
 	_log = FileAccess.open(log_file, FileAccess.WRITE)
 	_started = Time.get_datetime_string_from_system(false, true)
 	port = settings.value("port")
@@ -109,7 +114,8 @@ func _ready() -> void:
 		"item_use": _item_use, "item_destroy": _item_destroy,
 		"attack": _attack, "attack_stop": _attack_stop, "revive": _revive, "skill_seen": _skill_seen, "shortcut": _shortcut,
 		"skill_cast": _skill_cast, "skill_cancel": _skill_cancel, "debug_state": _debug_state,
-		"debug_skill": _debug_skill, "skill_learn": _skill_learn, "debug_char": _debug_char, "quest_where": _quest_where}
+		"debug_skill": _debug_skill, "skill_learn": _skill_learn, "debug_char": _debug_char, "quest_where": _quest_where,
+		"debug_item": _debug_item}
 	log_line("%s startet (Port %d, Protokoll %d, Prozess %d)" % [SERVER_NAME, port, Proto.VERSION, OS.get_process_id()])
 	var err = _open_database()
 	if err == "":
@@ -143,6 +149,9 @@ func _ready() -> void:
 		game_world.skills.learn_factor = stats.learn_money_factor
 		game_world.skills.stats_push = combat._push_stats
 		quests.skills = game_world.skills
+		quests.casting = casting # Effekt-Belohnungen (award buff)
+		inventory.casting = casting # Fertigkeits-Gegenstände (cast)
+		casting.item_used = inventory.use_up
 		quests.on_level_up = func(pl): game_world.skills.auto_learn(_peer_of_player(pl), pl)
 		var buffs = Buffs.new(game_world, net, log_line)
 		buffs.combat = combat
@@ -195,6 +204,17 @@ func _ready() -> void:
 		log_line("Testbefehle erlaubt (debug_commands)")
 	log_line("Bereit, warte auf Spieler ...")
 	_write_status(true)
+
+# Logs der letzten Läufe behalten (server.1.log = der vorige ... server.<LOG_KEEP>.log): ein Fehler, den der Spieler
+# erst nach einem Neustart meldet (z.B. ein Kick), steht so noch im Log
+func _rotate_logs() -> void:
+	if not FileAccess.file_exists(log_file):
+		return
+	for i in range(LOG_KEEP - 1, 0, -1):
+		var older = dir + "/server.%d.log" % i
+		if FileAccess.file_exists(older):
+			DirAccess.rename_absolute(older, dir + "/server.%d.log" % (i + 1))
+	DirAccess.rename_absolute(log_file, dir + "/server.1.log")
 
 func log_line(msg: String) -> void:
 	var line = "[%s] %s" % [Time.get_time_string_from_system(), msg]
@@ -299,11 +319,13 @@ func _load_world(only: String) -> void:
 		var s = _summary(data)
 		s["folder"] = main["folder"]
 		s["tag"] = main["tag"]
+		inventory.map_tags[map_name] = int(main["tag"]) # Quest-Würfel mit Ort (B22)
 		if not templates.is_empty():
 			var nm = Npcs.new(map_name, templates, game_world.npc_ids)
 			nm.mine_templates = inventory.mines
 			nm.movemap = _movemap(dir, map_name)
 			nm.load_spawns(data, main["folder"], terrain, Time.get_ticks_msec() / 1000.0)
+			nm.tag = int(main["tag"])
 			game_world.npc_maps[map_name] = nm
 			s["monsters"] = nm.counts["monsters"]
 			s["npcs"] = nm.counts["npcs"]
@@ -362,6 +384,9 @@ func _summary(data: Dictionary) -> Dictionary:
 func _on_peer_connected(id: int) -> void:
 	var pp = peer.get_peer(id)
 	var address = pp.get_remote_address() if pp != null else "?"
+	if pp != null: # Zeitlimit statt der ENet-Vorgabe 5 s: ein Client im Ladebildschirm antwortet mehrere Sekunden nicht (B16)
+		var ms = maxi(1, int(settings.value("net_timeout"))) * 1000
+		pp.set_timeout(Proto.NET_TIMEOUT_LIMIT, ms, ms * 2)
 	peers[id] = {"address": address, "at": Time.get_ticks_msec(), "hello": false, "account_id": 0, "account": "",
 		"since": "", "window": 0, "requests": 0, "char_id": 0, "char_info": {}, "busy": false}
 	log_line("Verbindung von %s (Peer %d)" % [address, id])
@@ -370,12 +395,15 @@ func _on_peer_disconnected(id: int) -> void:
 	var p = peers.get(id)
 	if p == null:
 		return
+	# Figur gewählt, aber noch nicht in der Welt: der Client war im Ladebildschirm (Fehlersuche B16)
+	var loading = not (p["char_info"] as Dictionary).is_empty() and not game_world.has(id)
 	game_world.leave(id)
 	peers.erase(id)
 	if p["account_id"] != 0:
 		if online.get(p["account_id"]) == id:
 			online.erase(p["account_id"])
-		log_line("Abgemeldet: %s (Peer %d, Verbindung getrennt) - %d online" % [p["account"], id, online.size()])
+		var during = ", im Ladebildschirm von %s" % str(p["char_info"].get("char", {}).get("name", "?")) if loading else ""
+		log_line("Abgemeldet: %s (Peer %d, Verbindung getrennt%s) - %d online" % [p["account"], id, during, online.size()])
 		_status_dirty = true
 	else:
 		log_line("Verbindung getrennt (Peer %d)" % id)
@@ -386,11 +414,13 @@ func kick(id: int, code: int) -> void:
 	if p == null:
 		return
 	net.push(id, "kicked", {"code": code})
+	var loading = not (p["char_info"] as Dictionary).is_empty() and not game_world.has(id)
 	game_world.leave(id)
 	if p["account_id"] != 0 and online.get(p["account_id"]) == id:
 		online.erase(p["account_id"])
 		_status_dirty = true
-	log_line("Getrennt: Peer %d %s(%s)" % [id, (p["account"] + " ") if p["account"] != "" else "", Proto.text(code)])
+	log_line("Getrennt: Peer %d %s(%s)%s" % [id, (p["account"] + " ") if p["account"] != "" else "", Proto.text(code),
+		" im Ladebildschirm" if loading else ""])
 	p["account_id"] = 0
 	p["kicked"] = true # eine noch laufende Anmeldung (Hash) meldet ihn nicht mehr an
 	var pp = peer.get_peer(id)
@@ -737,7 +767,7 @@ func _quest_where(id: int, _p: Dictionary, args: Dictionary) -> Array:
 	var kind = args.get("kind")
 	var tid = args.get("id")
 	var quest = args.get("quest", 0)
-	if not kind is String or not kind in ["mon", "item"] or not tid is int or not quest is int:
+	if not kind is String or not kind in ["mon", "npc", "item"] or not tid is int or not quest is int:
 		return [Proto.Code.BAD_REQUEST, {}]
 	var w = game_world.where_target(game_world.players[id], kind, tid, quest)
 	return [Proto.Code.OK, w] if not w.is_empty() else [Proto.Code.TARGET_INVALID, {}]
@@ -774,6 +804,24 @@ func _debug_char(id: int, _p: Dictionary, args: Dictionary) -> Array:
 	game_world.combat._push_stats(id, pl)
 	log_line("Test: %s auf Stufe %d mit %d Kupfer Gold, %d Kupfer Seelenmünzen" % [pl["name"], level, money, bind])
 	return [Proto.Code.OK, {"level": level, "money": money, "bind_money": bind}]
+
+# Test: Gegenstand in die Tasche legen {id, count} (nur mit debug_commands) -> {pos}
+func _debug_item(id: int, _p: Dictionary, args: Dictionary) -> Array:
+	if not debug_commands:
+		return [Proto.Code.NOT_ALLOWED, {}]
+	if not game_world.has(id) or inventory == null:
+		return [Proto.Code.NOT_IN_WORLD, {}]
+	var tid = args.get("id")
+	var count = args.get("count", 1)
+	if not tid is int or not count is int or count < 1 or not inventory.items.has(tid):
+		return [Proto.Code.BAD_REQUEST, {}]
+	var pl: Dictionary = game_world.players[id]
+	var put: Array = inventory.add(pl, tid, count)
+	if put.is_empty():
+		return [Proto.Code.BAG_FULL, {}]
+	inventory.push(id, pl)
+	log_line("Test: %s bekommt %d x %d" % [pl["name"], count, tid])
+	return [Proto.Code.OK, {"pos": int(put[0][0])}]
 
 func _peer_of_player(pl: Dictionary) -> int:
 	for peer in game_world.players:
@@ -936,7 +984,9 @@ func _exit_tree() -> void:
 	if inventory != null:
 		if inventory.quests != null:
 			inventory.quests.inventory = null
+			inventory.quests.casting = null
 		inventory.quests = null
+		inventory.casting = null
 		inventory.on_equip_changed = Callable()
 	if game_world != null:
 		if game_world.combat != null:
@@ -948,6 +998,7 @@ func _exit_tree() -> void:
 			game_world.casting.world = null
 			game_world.casting.combat = null
 			game_world.casting.stats_push = Callable()
+			game_world.casting.item_used = Callable()
 		if game_world.skills != null:
 			game_world.skills.info_of = Callable()
 		if game_world.buffs != null:

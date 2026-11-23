@@ -14,7 +14,11 @@ extends SceneTree
 #   gender (require_gender 0 männlich, 1 weiblich, 2 beide), hp, mp, dmg [min, max] (min_dmg,
 #   min_dmg + dmg_val), def (defence), hit (attack = Treffer), range (attack_range)
 # Quest-Würfel (TASKDICE_ESSENCE, z.B. EXP-Cocktail 9056 -> Quest 4218): dice [[Quest, Wahrscheinlichkeit]]
-#   (task_lists), use_time (time_intonate s) - Benutzen per Rechtsklick (inventory.gd use)
+#   (task_lists), use_time (time_intonate s) - Benutzen per Rechtsklick (inventory.gd use); at [Welt, center_x / y / z,
+#   half_len_x / y / z] (id_instance ungleich 0): nur dort benutzbar, z.B. der Samen 43953 in s31, die Giftige Bombe 14548 in s9
+# Fertigkeits-Gegenstände (SKILLMATTER_ESSENCE mit cast_skill): cast [Fertigkeit, Stufe] (id_skill / level_skill), keep
+#   (permenent: wird nicht verbraucht), lv (require_level), cool (cool_time ms) - Benutzen wirkt die Fertigkeit
+#   (inventory.gd use -> skill_cast.gd cast_item), z.B. 44134 "Blut des Werwolfgottes" -> 4572 (Effekt 2886)
 # proc (proc_type, wenn nicht 0): Bits wie CECIvtrItem PROC_*, z.B. 0x400 = nicht zerstörbar (inventory.gd destroy)
 # mines: Sammelpunkte (MINE_ESSENCE): t [min, max] s (time_min / time_max), dist (max_distance),
 #   task_in (Quest nötig), task_out (Quest, an die das Sammeln geht: CheckMining gibt den gesuchten
@@ -71,6 +75,8 @@ func _initialize() -> void:
 				items[id] = _item(r, l["type"] == "EQUIPMENT_ESSENCE")
 				if l["type"] == "TASKDICE_ESSENCE":
 					_dice(items[id], r)
+				elif l["type"] == "SKILLMATTER_ESSENCE":
+					_skill_matter(items[id], r)
 	var lines = ["{", "\"source\": %s," % JSON.stringify("%s 0x%x" % [path.get_file(), el.version]),
 		"\"note\": \"tools/server_data/item_templates.gd, Felder siehe dort\","]
 	for part in [["items", items], ["mines", mines]]:
@@ -104,6 +110,22 @@ static func _dice(o: Dictionary, r: Dictionary) -> void:
 	o["dice"] = list
 	if int(r.get("time_intonate", 0)) > 0:
 		o["use_time"] = int(r["time_intonate"])
+	if int(r.get("id_instance", 0)) != 0: # nur in dieser Welt und Box (item_taskdice::OnUse, CECHostPlayer::UseItemInPack)
+		o["at"] = [int(r["id_instance"]), int(r["center_x"]), int(r["center_y"]), int(r["center_z"]), int(r["half_len_x"]),
+			int(r["half_len_y"]), int(r["half_len_z"])]
+
+# Fertigkeits-Gegenstände (SKILLMATTER_ESSENCE mit cast_skill, z.B. 44134 "Blut des Werwolfgottes" -> 4572): Benutzen
+# wirkt die Fertigkeit id_skill auf Stufe level_skill; permenent = bleibt in der Tasche, sonst ein Stück weg
+static func _skill_matter(o: Dictionary, r: Dictionary) -> void:
+	if int(r.get("id_skill", 0)) == 0 or int(r.get("cast_skill", 0)) == 0:
+		return
+	o["cast"] = [int(r["id_skill"]), maxi(1, int(r.get("level_skill", 1)))]
+	if int(r.get("permenent", 0)) != 0:
+		o["keep"] = true
+	if int(r.get("require_level", 0)) > 1:
+		o["lv"] = int(r["require_level"])
+	if int(r.get("cool_time", 0)) > 0:
+		o["cool"] = int(r["cool_time"])
 
 func _item(r: Dictionary, equip: bool) -> Dictionary:
 	var o = {}

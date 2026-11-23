@@ -111,8 +111,7 @@ func _run():
 	plane_mesh.subdivide_depth = 2
 	mesh_instance.mesh = plane_mesh
 	
-	var shader = Shader.new()
-	shader.code = SHADER_CODE
+	var shader = preload("gfx_parser.gd").shared_shader(SHADER_CODE)
 	
 	var material = ShaderMaterial.new()
 	material.shader = shader

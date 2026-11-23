@@ -18,3 +18,6 @@
 
 # Python
 __pycache__/
+
+# Export output (built clients, lists, logs)
+/Export/

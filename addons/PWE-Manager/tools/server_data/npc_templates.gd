@@ -2,7 +2,7 @@ extends SceneTree
 
 # ====================================================
 # Erzeugt Server/npc_templates.json: Werte der Monster- und NPC-Vorlagen, die die Spawns in
-# Server/data/*/npcgen.data nennen (dazu die Quell-Monster der NPCs), aus der elements.data des
+# Server/data/*/npcgen.data nennen (dazu die Quell-Monster der NPCs und die Monster aus genMob-Fertigkeiten), aus der elements.data des
 # Spielservers (FW_496 server-fw/gamed/config/elements.data, Version 0x10000253; Felder wie
 # exptypes.h, angelica_elements.gd). Der Godot-Server braucht so keine Spieldaten.
 # Aufruf in einem Projekt mit dem Plugin unter res://addons/PWE-Manager:
@@ -102,9 +102,16 @@ func _initialize() -> void:
 		npcs.size(), missing.size(), missing.slice(0, 20), OUT])
 	quit(0)
 
-# Vorlagen-IDs aller Spawn-Gebiete in Server/data/*/npcgen.data
+# Vorlagen-IDs aller Spawn-Gebiete in Server/data/*/npcgen.data, dazu die Monster, die Fertigkeiten erzeugen (genMob: mob.id
+# in skill_templates.json, z.B. der Setzling 43954 aus 4575 "Segen der Erde (Säen)")
 func _spawn_ids() -> Array:
 	var ids = {}
+	var sk = JSON.parse_string(FileAccess.get_file_as_string(PLUGIN + "Server/skill_templates.json")) \
+		if FileAccess.file_exists(PLUGIN + "Server/skill_templates.json") else null
+	if sk is Dictionary:
+		for s in sk.get("skills", []):
+			if s.has("mob"):
+				ids[int(s["mob"]["id"])] = true
 	var data_dir = PLUGIN + "Server/data"
 	for folder in DirAccess.get_directories_at(data_dir):
 		var p = data_dir.path_join(folder).path_join("npcgen.data")

@@ -16,6 +16,10 @@ extends SceneTree
 #               (einer der Sammelpunkte 21067 auf ~183 m statt am Gelände 160 m), und der Bodenstrahl des Clients (world_npc.gd: ab 0,6 m
 #               darüber bis 4 m darunter) trifft für alle Objekte dort einen Boden
 #   Stufen      auf einer Platte: 0,3 m und 0,6 m hohe Stufen nimmt die Figur auf der Autoroute, an 1,0 m bleibt sie stehen
+#   Bude        s9 am Wiederbelebungspunkt (litmodel_2750, Querbalken 1,83 m über dem Boden): mit der Kollisionsbox des
+#               Originals (0,6 x 1,52 m) läuft die Figur darunter durch (die Wegekarte sagt dort begehbar)
+#   Ausweg      in der Bude: die Route der Wegekarte zu NPC 21041 führt durch ihre Seitenwand (die Figur bleibt stehen);
+#               der Ausweichschritt (client/route_escape.gd) findet mit der echten Kollision eine Route hinaus
 # Ende: "KOLLISIONS-TEST OK" (Exit 0) oder "KOLLISIONS-TEST FEHLER" (Exit 1).
 # ====================================================
 
@@ -26,6 +30,7 @@ const Files = preload("res://addons/PWE-Manager/Data/angelica_files.gd")
 const Buildings = preload("res://addons/PWE-Manager/MAP/angelica_buildings.gd")
 const Importer = preload("res://addons/PWE-Manager/ECM/ecm_importer.gd")
 const LocalPlayer = preload("../client/local_player.gd")
+const RouteEscape = preload("../client/route_escape.gd")
 const DATA_ROOT = "res://Stock-PWE-Client"
 # Startgebiete [Map, Name, Mitte]: Startpunkte der Startvorlagen (Server/start_roles.json)
 const AREAS = [["s9", "Zwergenstadt", Vector3(184.31, 184.5, -171.162)], ["s9", "Menschen", Vector3(-144.556, 101.998, 34.636)],
@@ -59,6 +64,8 @@ func _run() -> void:
 		await _drop_area(a[0], a[1], a[2])
 	await _spawns()
 	await _steps()
+	await _booth()
+	await _booth_escape()
 	_end()
 
 # Hüllen der Kindred-Stadt, deren Mitte bei FLAT_PLATE liegt -> Dreiecke
@@ -265,6 +272,90 @@ static func _box(pos: Vector3, size: Vector3) -> PackedVector3Array:
 	for i in idx:
 		out.append(verts[i] + off)
 	return out
+
+# Bude am Wiederbelebungspunkt von s9: vor dem Balken stehen, unter ihm hindurch in die Bude laufen (Richtung -z)
+func _booth() -> void:
+	const AT = Vector3(-144.6, 102.1, 42.1)
+	var src: PackedVector3Array = _faces["s9"]["faces"]
+	var box = AABB(AT - Vector3(20, 20, 20), Vector3(40, 40, 40))
+	var near = PackedVector3Array()
+	for i in range(0, src.size(), 3):
+		if box.has_point(src[i]) or box.has_point(src[i + 1]) or box.has_point(src[i + 2]):
+			near.append_array([src[i], src[i + 1], src[i + 2]])
+	var hm = HeightMap.new()
+	hm.load_dir("res://addons/PWE-Manager/Server/data/s9")
+	var t = _terrain(hm, AT, 20.0)
+	var b = _body(near)
+	var lp = LocalPlayer.new()
+	lp.setup(Node3D.new(), 1.95) # Modellhöhe einer großen Figur: die Kollision bleibt die Box des Originals
+	lp.input_enabled = false
+	lp.camera.current = false
+	root.add_child(lp)
+	lp.global_position = AT + Vector3(0, 0.3, 0)
+	for k in 30:
+		await physics_frame
+	var start = lp.global_position
+	lp.target = start + Vector3(0, 0, -3.0)
+	for k in 40:
+		await physics_frame
+	var moved = Vector2(lp.global_position.x - start.x, lp.global_position.z - start.z).length()
+	_check("s9 Bude am Wiederbelebungspunkt: unter dem Balken (1,83 m) hindurch %.2f m (Kollisionsbox 0,6 x 1,52 m)" % moved, moved > 1.5)
+	lp.queue_free()
+	t.queue_free()
+	b.queue_free()
+	await process_frame
+
+# In der Bude an der Seitenwand: Route der Wegekarte steckt fest, der Ausweichschritt führt hinaus
+func _booth_escape() -> void:
+	const S = Vector3(-145.3, 102.1, 41.0)
+	var src: PackedVector3Array = _faces["s9"]["faces"]
+	var box = AABB(S - Vector3(40, 30, 70), Vector3(80, 60, 120))
+	var near = PackedVector3Array()
+	for i in range(0, src.size(), 3):
+		if box.has_point(src[i]) or box.has_point(src[i + 1]) or box.has_point(src[i + 2]):
+			near.append_array([src[i], src[i + 1], src[i + 2]])
+	var hm = HeightMap.new()
+	hm.load_dir("res://addons/PWE-Manager/Server/data/s9")
+	var t = _terrain(hm, S + Vector3(0, 0, -25), 45.0)
+	var b = _body(near)
+	var files = Files.new(DATA_ROOT)
+	var mm = MoveMap.new()
+	mm.load(files, files.resolve("maps/s9/movemaps"))
+	var goal = Vector3.ZERO
+	var gen = load("res://addons/PWE-Manager/Server/npcgen.gd").new().read("res://addons/PWE-Manager/Server/data/s9/npcgen.data")
+	for a in gen["areas"]:
+		for g in a["gens"]:
+			if int(g["id"]) == 21041:
+				goal = Vector3(a["pos"][0], a["pos"][1], a["pos"][2])
+	var dh = maxf(0.0, S.y - hm.height(S.x, S.z))
+	var moved = []
+	for use_escape in [false, true]:
+		var lp = LocalPlayer.new()
+		lp.setup(Node3D.new(), 1.8)
+		lp.input_enabled = false
+		lp.camera.current = false
+		root.add_child(lp)
+		lp.global_position = S + Vector3(0, 0.3, 0)
+		for k in 30:
+			await physics_frame
+		var path: PackedVector3Array
+		if use_escape:
+			path = RouteEscape.find(lp, mm, goal, dh, true, 0.0).get("path", PackedVector3Array())
+		else:
+			path = mm.find_path(lp.global_position, goal, dh, true, 0.0)
+		var start = lp.global_position
+		if not path.is_empty():
+			lp.follow_path(path)
+		for k in 150:
+			await physics_frame
+		moved.append(Vector2(lp.global_position.x - start.x, lp.global_position.z - start.z).length())
+		lp.queue_free()
+		await process_frame
+	_check("s9 Bude, Seitenwand (Ziel 21041 bei %s): Route der Wegekarte %.1f m weit, mit Ausweichschritt %.1f m" % [
+		goal.snapped(Vector3.ONE), moved[0], moved[1]], goal != Vector3.ZERO and moved[1] > 3.0)
+	t.queue_free()
+	b.queue_free()
+	await process_frame
 
 func _check(what: String, ok: bool) -> void:
 	checks += 1

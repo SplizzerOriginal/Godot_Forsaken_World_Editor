@@ -27,7 +27,7 @@ func execute(root_node: Node):
 		push_warning("Keine Nodes mit der ID " + _element_id() + " gefunden!")
 		return
 
-	var undo_redo = EditorInterface.get_editor_undo_redo()
+	var undo_redo = Engine.get_singleton(&"EditorInterface").get_editor_undo_redo() # nur im Editor (Klasse fehlt im Export)
 	undo_redo.create_action("Create " + _node_name() + " for ID_" + _element_id())
 
 	# 1. Nodes nach Parent (Header) gruppieren
@@ -124,7 +124,7 @@ func _gather_ctrl_nodes(node: Node) -> Array:
 
 	return results
 
-func _create_with_shader(parent_node: Node3D, root_node: Node, undo_redo: EditorUndoRedoManager, max_group_time: float):
+func _create_with_shader(parent_node: Node3D, root_node: Node, undo_redo, max_group_time: float):
 	if parent_node.has_node(_node_name()):
 		return
 
@@ -154,8 +154,7 @@ func build_element_node(parent_node: Node, max_group_time: float) -> MeshInstanc
 	mesh_instance.extra_cull_margin = 1000.0
 
 	var uniform_assignments = {}
-	var shader = Shader.new()
-	shader.code = preload("gfx_parser.gd").add_gfx_alpha(_build_shader_code(parent_node, parsed_data, param_types, max_group_time, uniform_assignments))
+	var shader = preload("gfx_parser.gd").shared_shader(preload("gfx_parser.gd").add_gfx_alpha(_build_shader_code(parent_node, parsed_data, param_types, max_group_time, uniform_assignments)))
 	# Mesh erst nach dem Shader: die Hooks kennen dann die Strukturwerte des Elements
 	mesh_instance.mesh = _build_mesh(parsed_data)
 
@@ -174,7 +173,9 @@ func build_element_node(parent_node: Node, max_group_time: float) -> MeshInstanc
 				else: mat.set_shader_parameter(uniform_name, val)
 			else: mat.set_shader_parameter(uniform_name, val)
 
-	mat.render_priority = clampi(int(parsed_data.get("Priority", 0)), Material.RENDER_PRIORITY_MIN, Material.RENDER_PRIORITY_MAX)
+	mat.render_priority = preload("gfx_parser.gd").element_priority(parent_node, parsed_data) # Reihenfolge in der Datei, nicht Priority
+	if _as_bool(parsed_data.get("Warp", "0")): # Warp zuerst, die übrigen GFX darüber (gfx_parser.gd warp_fragment)
+		mat.render_priority = preload("gfx_parser.gd").WARP_PRIORITY
 	mesh_instance.material_override = mat
 	return mesh_instance
 
@@ -206,7 +207,7 @@ func _build_shader_code(parent_node: Node, parsed_data: Dictionary, param_types:
 		shader_code += ", depth_test_disabled"
 	shader_code += ";\n\n"
 	if has_warp:
-		shader_code += "uniform sampler2D screen_texture : hint_screen_texture, filter_linear_mipmap;\n"
+		shader_code += preload("gfx_parser.gd").WARP_UNIFORM
 	shader_code += "varying float v_current_time;\n"
 	shader_code += "varying vec4 v_color;\n"
 	shader_code += "varying float v_active;\n\n"
@@ -361,12 +362,7 @@ func _build_shader_code(parent_node: Node, parsed_data: Dictionary, param_types:
 	shader_code += "\t}\n\n"
 	shader_code += "\tvec4 tex_color = texture(TexFile, UV);\n"
 	if has_warp:
-		shader_code += "\n\t// --- WARP (HEAT DISTORTION, wie ID_100) ---\n"
-		shader_code += "\tvec3 normal_map = tex_color.rgb * 2.0 - 1.0;\n"
-		shader_code += "\tnormal_map = normalize(mix(vec3(0.0, 0.0, 1.0), normal_map, tex_color.a));\n"
-		shader_code += "\tvec2 warp_dir = normal_map.xy / max(normal_map.z, 0.1);\n"
-		shader_code += "\tALBEDO = texture(screen_texture, SCREEN_UV + warp_dir * 0.50 * v_color.a).rgb;\n"
-		shader_code += "\tALPHA = tex_color.a;\n"
+		shader_code += preload("gfx_parser.gd").warp_fragment("tex_color", "v_color.a")
 	else:
 		shader_code += "\ttex_color *= v_color;\n"
 		if render_blend_mode == "blend_mix":

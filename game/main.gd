@@ -5,6 +5,7 @@ extends Node
 # Kommandozeile nach "--" bzw. dem Export:
 #   Server   --server oder Export mit "dedicated_server"   -> Net + Server (server/server.gd)
 #   Bot      --bot (Test ohne Fenster)                      -> Bot (tests/bot.gd)
+#   Rauchtest --smoke (exportiertes Programm, Leiste EXPORT) -> Client wie unten + tests/smoke.gd (betritt die Welt)
 #   sonst    Client                                        -> Net + Session + Login im Spielstil
 #            (client/login_screen.gd; ohne Spieldaten das einfache Fenster client/client.gd)
 # Statt Autoloads hängen Netz und Sitzung hier, so braucht project.godot keine Einträge.
@@ -17,6 +18,7 @@ const Session = preload("client/session.gd")
 const Client = preload("client/client.gd")
 const LoginScreen = preload("client/login_screen.gd")
 const Bot = preload("tests/bot.gd")
+const Smoke = preload("tests/smoke.gd")
 
 enum Role {CLIENT, SERVER, BOT}
 
@@ -45,6 +47,8 @@ func _ready() -> void:
 				_add(LoginScreen.new(), "Login")
 			else:
 				_add(Client.new(), "Client")
+			if Settings.user_args().has("smoke"):
+				_add(Smoke.new(), "Smoke")
 
 func _add(node: Node, node_name: String) -> void:
 	node.name = node_name

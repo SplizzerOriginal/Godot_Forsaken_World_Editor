@@ -128,6 +128,7 @@ func build_node(map_name: String, files = null, elements = null) -> Node3D:
 		for x in r["res"]:
 			var e = x.duplicate()
 			e["name"] = _name(elements, x["id"])
+			e["model"] = _mine_model(elements, x["id"]) # Modell der Sammelpunkte mit importieren (Performance-Fahrplan P2e)
 			res.append(e)
 		var label = "0"
 		if not res.is_empty():
@@ -161,14 +162,14 @@ func build(map_name: String, map_root: Node3D, files = null) -> int:
 	set_owner_recursive(node, map_root)
 	return count_markers(node)
 
-# Modelle der NPCs und Monster unter node (Knoten Spawns) importieren; Meta "models" am Knoten.
+# Modelle der NPCs, Monster und Sammelpunkte unter node (Knoten Spawns) importieren; Meta "models" am Knoten.
 # importer: ecm_importer.gd (Hinweise landen in seinen warnings) -> Anzahl der Modelle
 func import_models(node: Node3D, importer) -> int:
 	var by_model = {} # .ecm -> [Vorlagen-IDs]
 	for group in node.get_children():
 		for m in group.get_children():
 			var s: Dictionary = m.get_meta("spawn", {})
-			for g in s.get("gens", []):
+			for g in s.get("gens", []) + s.get("res", []):
 				if g.get("model", "") != "":
 					if not by_model.has(g["model"]):
 						by_model[g["model"]] = []
@@ -181,7 +182,7 @@ func import_models(node: Node3D, importer) -> int:
 		if res["scene"] == null:
 			continue
 		count += 1
-		var scene: String = importer.out_path(res["ecm"], ".tscn")
+		var scene: String = importer.scene_of(res["ecm"])
 		for id in by_model[rel]:
 			models[id] = scene
 	node.set_meta("models", models)
@@ -203,6 +204,16 @@ static func _name(elements, id: int) -> String:
 
 static func _model(elements, id: int) -> String:
 	return elements.model_of(id) if elements != null and id > 0 else ""
+
+# Modell eines Sammelpunkts (MINE_ESSENCE file_matter, wie npc_data.gd), "" sonst - ohne das baute der Client die Modelle der
+# Sammelpunkte bei jedem Betreten selbst (s9: Waffenregale, Kürbis, Grab)
+static func _mine_model(elements, id: int) -> String:
+	if elements == null or id <= 0:
+		return ""
+	var r: Dictionary = elements.get_record(id)
+	if str(r.get("_type", "")) != "MINE_ESSENCE":
+		return ""
+	return elements.path_of(int(r.get("file_matter", 0)))
 
 func _group(root: Node3D, groups: Dictionary, name: String) -> Node3D:
 	if not groups.has(name):

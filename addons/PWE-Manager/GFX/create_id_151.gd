@@ -36,7 +36,7 @@ func _node_name() -> String:
 	return BOLT_NODE_NAME
 
 # Wie create_id_140, aber der Node hat Kinder -> alle bekommen einen Owner
-func _create_with_shader(parent_node: Node3D, root_node: Node, undo_redo: EditorUndoRedoManager, max_group_time: float):
+func _create_with_shader(parent_node: Node3D, root_node: Node, undo_redo, max_group_time: float):
 	if parent_node.has_node(_node_name()):
 		return
 	var node = build_bolt_node(parent_node, max_group_time)

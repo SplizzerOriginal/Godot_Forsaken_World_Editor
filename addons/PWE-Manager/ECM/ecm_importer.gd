@@ -11,7 +11,7 @@ extends RefCounted
 #         CoGfx: die GFX, die dauerhaft an Hooks des Modells hängen, samt Blitz-Endpunkten an Hooks
 #                (ecm_cogfx.gd, ecm_cogfx_param.gd)
 #   .gfx  Datei-Node samt Elementen (gfx_parser.gd, create_id_200.gd) als Wurzel der Szene
-#   .smd  Modelle der GFX (Element 160) wie das Modell einer .ecm, als <SMD>_model.tscn
+#   .smd  Modelle der GFX (Element 160) wie das Modell einer .ecm, als <SMD>_model.scn
 #   .trn2 Map (maps\<map>\): Terrain, Gebäude (litmodels\<map>\), Wasser und Objekte (Effekte,
 #         ECModelle, Sounds aus <map>.ecwld), als <map>.tscn
 #         (angelica_terrain.gd, angelica_buildings.gd, angelica_world.gd)
@@ -21,7 +21,7 @@ extends RefCounted
 # Spielordner = Ordner mit "models" / "gfx" / "textures" / "building" / "litmodels" / "maps" / "sfx" darin. Die Daten können mehrere haben (z.B.
 # res://.resources mit gfx und res://.resources/resources mit models und gfx): ein Pfad gilt
 # zuerst im Spielordner der Datei, die ihn nennt, dann in den anderen.
-# Gespeichert werden <ECM>.tscn / <GFX>.tscn, <SMD>_actions.res (Animationen, von allen ECMs der
+# Gespeichert werden <ECM>.scn / <GFX>.scn (binär, ältere Importe .tscn), <SMD>_actions.res (Animationen, von allen ECMs der
 # .smd geteilt), <SKI>_mesh.res und die Texturen (.dds unverändert kopiert).
 # Aktions-Ereignisse liest read_ecm (actions[].events: GFX 100, Sound 101, Angriffspunkt 104), der
 # Import setzt sie noch nicht um; Kind-Modelle der .ecm fehlen noch.
@@ -31,14 +31,22 @@ extends RefCounted
 # ====================================================
 
 const OUT_ROOT = "res://ECM_Import"
+const SHADER_DIR = OUT_ROOT + "/shaders" # gemeinsame GFX-Shader als Dateien (Performance-Fahrplan P1)
 # Abschnitte nach den CoGfx (CECModelStaticData::LoadData): ab hier sind Ereignisse keine CoGfx mehr
 const AFTER_COGFX = ["CombineActName", "ECMHookCount", "AddiSkinCount", "ChildCount", "ScriptCount", "PhysFileName"]
 const ACTION_EVENTS = [100, 101, 104] # GFX, Sound, Angriffspunkt (EVENT_TYPE_*)
 const ROOT_MARKERS = ["models", "gfx", "textures", "building", "litmodels", "maps", "sfx"]
-const SMD_SCENE_SUFFIX = "_model.tscn"
+# Modelle und GFX binär (Performance-Fahrplan P2c: Modelle laden ~2x schneller als Text, s31 34 Modelle Vulkan 2,3 -> 1,7 s);
+# die Map-Szene bleibt Text (klein, kein Gewinn, Client und Tests suchen <map>.tscn); lesbar bleiben die Shader-Dateien
+const SCENE_EXT = ".scn"
+const SMD_SCENE_SUFFIX = "_model" + SCENE_EXT
 const Sources = preload("../GFX/gfx_sources.gd")
 const Builder = preload("angelica_model_builder.gd")
 const Parser = preload("../GFX/gfx_parser.gd")
+const GfxRefresh = preload("gfx_refresh.gd") # Stempel des GFX-Codes in importierten Szenen
+const Att = preload("../GFX/angelica_att.gd")
+const Store = preload("../Data/angelica_store.gd")
+const ATT_BIN = "_att.bin" # eingelesene .att (Leiste EXPORT, Performance-Fahrplan P2f2): store_var neben den Szenen
 
 var files # angelica_files.gd, root = Spielordner des Modells, das gerade gebaut wird
 var reader # angelica_model_reader.gd
@@ -49,6 +57,7 @@ var _game_roots: Array = []
 var _context_root = "" # Spielordner der Datei, die gerade importiert wird
 var _stack: Array = [] # verschachtelte Importe: [Datei, Spielordner davor, files.root davor]
 var _cache = {} # je Import einmal gebaut: Quelle -> PackedScene / Texture2D
+var _ensured = {} # ensure_gfx: schon geprüfte bzw. umgewandelte GFX (Quelle -> true), je Import
 var _tex_builder = null # lädt die Texturen der GFX
 var runtime = false # nichts schreiben (siehe oben)
 
@@ -73,6 +82,15 @@ func out_path(src: String, new_ext: String = "") -> String:
 		return ""
 	var rel = src.substr(root.length() + 1)
 	return OUT_ROOT.path_join(rel.get_basename() + new_ext if new_ext != "" else rel)
+
+# Importierte Szene einer Quelle (.ecm / .gfx): binär (SCENE_EXT), sonst eine ältere Text-Szene (.tscn), sonst der Pfad, unter
+# dem ein Import sie anlegen würde
+func scene_of(src: String) -> String:
+	var bin = out_path(src, SCENE_EXT)
+	if bin == "" or ResourceLoader.exists(bin):
+		return bin
+	var text = out_path(src, ".tscn")
+	return text if ResourceLoader.exists(text) else bin
 
 # Spielordner einer Datei: der Ordner über dem ersten Eintrag aus ROOT_MARKERS in ihrem Pfad, sonst der
 # Datenordner (fallback = false: ""). "" auch außerhalb der Daten.
@@ -134,6 +152,7 @@ func _enter(path: String) -> void:
 		warnings = []
 		written = []
 		_cache.clear()
+		_ensured.clear()
 		_tex_builder = null
 		Sources.begin(self)
 	_stack.append([path, _context_root, files.root])
@@ -146,6 +165,8 @@ func _leave() -> void:
 	if _stack.is_empty():
 		Sources.end()
 		Parser.release_decoder()
+		if not runtime:
+			Parser.release_shader_pool() # Editor-Import fertig (zur Laufzeit teilen alle GFX der Sitzung den Vorrat)
 		_cache.clear()
 		_tex_builder = null # hält über texture_dest den Importer: Zyklus auflösen
 
@@ -277,7 +298,7 @@ func import_ecm(ecm_path: String) -> Dictionary:
 	return res
 
 func _import_ecm(ecm_path: String) -> Dictionary:
-	var scene_path = out_path(ecm_path, ".tscn")
+	var scene_path = out_path(ecm_path, SCENE_EXT)
 	if scene_path == "":
 		return {"error": ecm_path + " liegt nicht in den Spieldaten " + data_root}
 	var builder = _new_builder()
@@ -292,8 +313,16 @@ func _import_ecm(ecm_path: String) -> Dictionary:
 	var root: Node3D = built["root"]
 	root.set_meta("ecm_path", ecm_path)
 	root.set_meta("smd_path", smd_path)
+	root.set_meta(GfxRefresh.STAMP_META, GfxRefresh.stamp()) # Stand der eingebackenen CoGfx (Client baut ältere neu)
 	var cogfx = preload("ecm_cogfx.gd").new(files, warnings)
 	cogfx.build(root, root.get_node("Skeleton3D"), builder.hook_bones, model["ecm"]["cogfx"])
+	# Angriffspunkte und GFX- / Klang-Ereignisse (P2f2): der Client liest dafür die .ecm nicht mehr (attack_fx.gd points_of);
+	# ihre GFX und .att gleich mit umwandeln
+	# immer setzen, auch leer: sonst liest attack_fx.gd points_of doch die .ecm (die es im Export nicht gibt, P2f6)
+	root.set_meta("attack_points", attack_points(model["ecm"]))
+	root.set_meta("action_events", action_events(model["ecm"]))
+	if not runtime:
+		import_action_assets(model["ecm"])
 	return _save_model(root, built, smd_path, scene_path)
 
 # .ecm nur im Speicher bauen (schreibt nichts, Texturen direkt aus den Spieldaten), für Figuren zur
@@ -312,7 +341,7 @@ func build_ecm(ecm_path: String) -> Dictionary:
 	built["root"].set_meta("ecm_path", ecm_path)
 	return {"root": built["root"]}
 
-# Modell einer GFX (A3DGFXModel: gfx\Models\<ModelPath>) -> Szene <SMD>_model.tscn
+# Modell einer GFX (A3DGFXModel: gfx\Models\<ModelPath>) -> Szene <SMD>_model.scn
 func import_smd(smd_path: String) -> Dictionary:
 	if _in_progress(smd_path):
 		return {"error": smd_path.get_file() + " enthält sich selbst"}
@@ -337,15 +366,16 @@ func _import_smd(smd_path: String) -> Dictionary:
 	built["root"].set_meta("smd_path", smd_path)
 	return _save_model(built["root"], built, smd_path, scene_path)
 
-# .gfx -> Szene <GFX>.tscn: der Datei-Node (gfx_data_node.gd) ist die Wurzel, darunter die Elemente
+# .gfx -> Szene <GFX>.scn: der Datei-Node (gfx_data_node.gd) ist die Wurzel, darunter die Elemente
 func import_gfx(gfx_path: String) -> Dictionary:
-	var scene_path = out_path(gfx_path, ".tscn")
+	var scene_path = out_path(gfx_path, SCENE_EXT)
 	if scene_path == "":
 		return {"error": gfx_path + " liegt nicht in den Spieldaten " + data_root}
 	if not files.file_exists(gfx_path):
 		return {"error": gfx_path + " nicht gefunden"}
 	_enter(gfx_path)
 	var node = build_gfx(gfx_path, _node_name(gfx_path.get_file().get_basename()))
+	node.set_meta(GfxRefresh.STAMP_META, GfxRefresh.stamp()) # Stand des GFX-Codes (Client baut ältere Karten-Effekte neu)
 	for child in node.get_children():
 		_set_owner(child, node)
 	var packed = PackedScene.new()
@@ -366,11 +396,104 @@ func gfx_scene(gfx_path: String) -> PackedScene:
 	if src == "" or src.get_extension().to_lower() != "gfx":
 		warn("GFX " + gfx_path + " nicht in den Spieldaten")
 		return null
+	if runtime:
+		# schon umgewandelt (Map-Import, Leiste EXPORT) und mit dem jetzigen GFX-Code: laden statt bauen
+		var conv = out_path(src, SCENE_EXT)
+		if ResourceLoader.exists(conv):
+			var packed = load(conv) as PackedScene
+			if packed != null and not GfxRefresh.outdated(packed):
+				return packed
+		if Store.listing_active(src): # exportiertes Spiel ohne Original-Daten (P2f6): bauen ginge nur zu einer leeren Szene
+			warn("GFX " + gfx_path + " ist nicht umgewandelt")
+			return null
 	var res = import_gfx(src)
 	if res.has("error"):
 		warn(res["error"])
 		return null
 	return res["packed"] if res.has("packed") else load(res["scene"]) as PackedScene
+
+# Angriffs-Datei (gfx\SkillAttack\<att_path>) eingelesen (angelica_att.gd): umgewandelt als <att>_att.bin, sonst aus den
+# Spieldaten; {} = fehlt
+func att_of(att_path: String) -> Dictionary:
+	var src = find_game_file("gfx/SkillAttack/" + att_path.strip_edges())
+	if src == "":
+		return {}
+	var conv = out_path(src, ATT_BIN)
+	if conv != "" and FileAccess.file_exists(conv):
+		var f = FileAccess.open(conv, FileAccess.READ)
+		var v = f.get_var() if f != null else null
+		if v is Dictionary:
+			return v
+	return Att.read(files, src)
+
+# .att einlesen und als <att>_att.bin speichern (nicht im Laufzeit-Modus) -> eingelesene .att
+func save_att(att_path: String) -> Dictionary:
+	var src = find_game_file("gfx/SkillAttack/" + att_path.strip_edges())
+	if src == "":
+		warn("ATT " + att_path + " nicht in den Spieldaten")
+		return {}
+	var att = Att.read(files, src)
+	var conv = out_path(src, ATT_BIN)
+	if not runtime and conv != "" and not att.is_empty():
+		DirAccess.make_dir_recursive_absolute(conv.get_base_dir())
+		var f = FileAccess.open(conv, FileAccess.WRITE)
+		if f != null:
+			f.store_var(att)
+			f.close()
+			if not conv in written:
+				written.append(conv)
+	return att
+
+# GFX-Pfade (relativ zu gfx\) einer eingelesenen .att: Flug, Boden, Treffer
+static func att_gfx(att: Dictionary) -> Array:
+	var out = []
+	for k in att:
+		if att[k] is Dictionary and str(att[k].get("gfx", "")) != "":
+			out.append(str(att[k]["gfx"]))
+	return out
+
+# GFX umwandeln, falls es noch keine Szene mit dem jetzigen GFX-Code gibt (GfxPath relativ zu gfx\) -> "" oder Fehler
+func ensure_gfx(gfx_path: String) -> String:
+	var src = find_game_file("gfx/" + gfx_path.strip_edges())
+	if src == "" or src.get_extension().to_lower() != "gfx":
+		return "GFX " + gfx_path + " nicht in den Spieldaten"
+	if _ensured.has(src) or _cache.has(src):
+		return ""
+	_ensured[src] = true
+	var conv = out_path(src, SCENE_EXT)
+	if ResourceLoader.exists(conv):
+		var packed = load(conv) as PackedScene
+		if packed != null and not GfxRefresh.outdated(packed):
+			return ""
+	var res = import_gfx(src)
+	if res.has("error"):
+		return res["error"]
+	_ensured[src] = true # import_gfx leert die Liste als oberster Import
+	return ""
+
+# GFX der Aktions-Ereignisse (100) und die .att der Angriffspunkte samt ihren GFX umwandeln (Leiste EXPORT, Map-Import der
+# NPC-Modelle) -> Anzahl GFX
+func import_action_assets(ecm: Dictionary) -> int:
+	var gfx = {}
+	var events = action_events(ecm)
+	for a in events:
+		for e in events[a]:
+			if int(e["type"]) == 100:
+				for f in e["files"]:
+					gfx[str(f)] = true
+	var points = attack_points(ecm)
+	var atts = {}
+	for a in points:
+		for p in points[a]:
+			atts[str(p[1])] = true
+	for att_path in atts:
+		for g in att_gfx(save_att(att_path)):
+			gfx[g] = true
+	for g in gfx:
+		var err = ensure_gfx(g)
+		if err != "":
+			warn(err)
+	return gfx.size()
 
 # Terrain einer Map (.trn2 in maps\<map>\) -> Szene <map>.tscn
 func import_map(trn2_path: String) -> Dictionary:
@@ -381,6 +504,8 @@ func import_map(trn2_path: String) -> Dictionary:
 		return {"error": trn2_path + " nicht gefunden"}
 	_enter(trn2_path)
 	var res = preload("../MAP/angelica_terrain.gd").new(self).build(trn2_path, scene_path)
+	if not res.has("error"):
+		_save_collision(trn2_path.get_file().get_basename(), scene_path.get_base_dir())
 	_leave()
 	if res.has("error"):
 		return res
@@ -564,7 +689,8 @@ func source_texture(tex_path: String) -> Texture2D:
 
 # Path eines GFX-Sounds (A3DGFXSound: sfx\<Path>) -> AudioStreamWAV (ohne Schleife), gespeichert als
 # <Datei>_sfx.res (die Umgebungsklänge der Maps liegen als <Datei>.res mit Schleife daneben),
-# null = fehlt; nur .wav (die Spieldaten haben nur .wav)
+# null = fehlt; nur .wav (die Spieldaten haben nur .wav). Zur Laufzeit die schon umgewandelte <Datei>_sfx.res (Map- und
+# GFX-Import, Leiste EXPORT Schritt Klänge - Performance-Fahrplan P2f5), sonst aus den Spieldaten gebaut.
 func source_sound(sound_path: String) -> AudioStream:
 	var key = "sfx:" + sound_path.strip_edges().to_lower()
 	if _cache.has(key):
@@ -576,13 +702,59 @@ func source_sound(sound_path: String) -> AudioStream:
 	elif src.get_extension().to_lower() != "wav":
 		warn("Sound " + sound_path + ": nur .wav wird unterstützt")
 	else:
-		stream = AudioStreamWAV.load_from_buffer(wav_bytes(src))
+		var conv = out_path(src, "_sfx.res")
+		if runtime and conv != "" and ResourceLoader.exists(conv):
+			stream = load(conv) as AudioStreamWAV
 		if stream == null:
-			warn("Sound " + sound_path + " nicht lesbar")
-		elif _save(stream, out_path(src, "_sfx.res")) != OK:
-			warn("Sound " + sound_path + " nicht gespeichert")
+			stream = AudioStreamWAV.load_from_buffer(wav_bytes(src))
+			if stream == null:
+				warn("Sound " + sound_path + " nicht lesbar")
+			elif _save(stream, conv) != OK:
+				warn("Sound " + sound_path + " nicht gespeichert")
 	_cache[key] = stream
 	return stream
+
+# Musikstück (music\<Datei>.ogg) -> AudioStreamOggVorbis: umgewandelt als <Datei>.res unter res://ECM_Import/music (Leiste
+# EXPORT, Schritt Klänge), sonst aus den Spieldaten (und gespeichert, außer zur Laufzeit); null = fehlt. Der Client spielt
+# noch keine Musik - das hier ist ihr Weg dorthin.
+func source_music(music_path: String) -> AudioStream:
+	var src = find_game_file("music/" + music_path.strip_edges())
+	if src == "" or src.get_extension().to_lower() != "ogg":
+		warn("Musik music\\" + music_path + " nicht in den Spieldaten")
+		return null
+	var conv = out_path(src, ".res")
+	if conv != "" and ResourceLoader.exists(conv):
+		var loaded = load(conv) as AudioStream
+		if loaded != null:
+			return loaded
+	var stream = AudioStreamOggVorbis.load_from_buffer(files.get_bytes(src))
+	if stream == null:
+		warn("Musik " + music_path + " nicht lesbar")
+		return null
+	if not runtime:
+		strip_ogg_comments(stream)
+	if _save(stream, conv) != OK:
+		warn("Musik " + music_path + " nicht gespeichert")
+	return stream
+
+# Kommentar-Paket der Ogg-Daten (Titel, Künstler ... in GBK) durch ein leeres ersetzen: Godot liest es bei jedem Laden als
+# UTF-8 und meldet dann "Unicode parsing error"; der Klang bleibt unverändert, das Spiel zeigt die Angaben nirgends
+static func strip_ogg_comments(stream: AudioStreamOggVorbis) -> void:
+	var seq: OggPacketSequence = stream.packet_sequence
+	if seq == null:
+		return
+	var pages: Array = seq.packet_data
+	var empty = PackedByteArray([3]) + "vorbis".to_ascii_buffer() + PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0, 1])
+	for pi in mini(pages.size(), 3):
+		var page: Array = pages[pi]
+		for k in page.size():
+			var pk: PackedByteArray = page[k]
+			if pk.size() > 7 and pk[0] == 3 and pk.slice(1, 7).get_string_from_ascii() == "vorbis":
+				page[k] = empty
+				pages[pi] = page
+				seq.packet_data = pages
+				stream.tags = {}
+				return
 
 # .wav nur mit "fmt " und "data": Godot meldet sonst Fehler bei den Metadaten der Spieldateien
 # (GBK-Text in LIST / INFO, "bext" ungerader Länge ohne Füllbyte am Dateiende)
@@ -648,6 +820,8 @@ func _save(res: Resource, path: String) -> int:
 	if path == "":
 		return ERR_FILE_BAD_PATH
 	DirAccess.make_dir_recursive_absolute(path.get_base_dir())
+	if res is PackedScene:
+		_externalize_shaders(res)
 	res.take_over_path(path)
 	if not path in written:
 		written.append(path)
@@ -655,6 +829,51 @@ func _save(res: Resource, path: String) -> int:
 	if err == OK:
 		Builder.register_uid(path)
 	return err
+
+# Gebäude-Kollision der Map vorab speichern (Performance-Fahrplan P2b), binär neben die Map-Szene
+func _save_collision(map_name: String, out_dir: String) -> void:
+	var bld = preload("../MAP/angelica_buildings.gd")
+	var shape = bld.new(self).collision_shape(map_name)
+	if shape == null:
+		warn(map_name + ": keine Gebäude-Kollision zum Speichern")
+		return
+	if _save(shape, out_dir.path_join(map_name + bld.COLLISION_SUFFIX)) != OK:
+		warn(map_name + ": Gebäude-Kollision nicht gespeichert")
+
+# Eingebettete Shader einer Szene als eigene Dateien SHADER_DIR/gfx_<MD5 des Texts>.gdshader (lesbarer Text), die Szene
+# verweist darauf (Performance-Fahrplan P1): Vulkan übersetzt jedes Shader-Objekt schon beim Laden, wenn sein Material
+# entsteht (~10 ms), auch bei gleichem Text - eingebettet hatte jede Szene ihre eigenen Kopien (s31 + Modelle: ~970 Objekte
+# für ~320 Texte, ~9 s Mehrzeit gegenüber headless). Als Datei lädt Godot jeden Text einmal je Sitzung für alle Szenen.
+# Shader, die schon eine Datei sind (z.B. angelica_litmodel.gdshader), bleiben, wie sie sind.
+func _externalize_shaders(packed: PackedScene) -> void:
+	var st = packed.get_state()
+	for i in st.get_node_count():
+		for j in st.get_node_property_count(i):
+			var v = st.get_node_property_value(i, j)
+			if v is ShaderMaterial:
+				_externalize(v)
+			elif v is Mesh:
+				for k in (v as Mesh).get_surface_count():
+					var m = (v as Mesh).surface_get_material(k)
+					if m is ShaderMaterial:
+						_externalize(m)
+
+func _externalize(m: ShaderMaterial) -> void:
+	var sh = m.shader
+	if sh == null or (sh.resource_path != "" and not "::" in sh.resource_path):
+		return
+	var path = SHADER_DIR.path_join("gfx_" + sh.code.md5_text() + ".gdshader")
+	if ResourceLoader.exists(path):
+		var existing = load(path) as Shader
+		if existing != null and existing.code == sh.code:
+			m.shader = existing
+			return
+	DirAccess.make_dir_recursive_absolute(SHADER_DIR)
+	if ResourceSaver.save(sh, path) == OK:
+		sh.take_over_path(path)
+		Builder.register_uid(path)
+		if not path in written:
+			written.append(path)
 
 func _set_owner(node: Node, owner: Node) -> void:
 	node.owner = owner

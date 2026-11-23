@@ -21,6 +21,9 @@ extends SceneTree
 #                     Stufe 3 ersetzt ihn (kein zweiter), Krieger: Leben +3 %; einsetzen -> SKILL_PASSIVE; nach Verlassen
 #                     und Betreten der Welt liegt er wieder
 #   Schalter (F7)     einen einsetzbaren Schalter der Klasse lernen und einsetzen -> skill_switch an; erneut -> aus (off)
+#   NPC-Ort (B19)     quest_where "npc" nach Edward Olgen 44826 (Werwolf-Folgequest 15850): der Server kennt ihn aus seinen
+#                     Spawn-Daten in s31 nahe (-194 | 257 | 336) - beim Werwolf in derselben Welt, bei allen anderen
+#                     world -1 (anderes Gebiet); die task_npc.data des neueren Clients hat ihn schon in s43
 #   Lernen (F8)       debug_char Stufe 10: alle Klassen-Fertigkeiten bis Stufe 10 von selbst (skill_new, skill_catalog);
 #                     Stufe 25: von selbst nur bis Stufe 20; eine Stufe bis 25 ohne Geld -> NOT_ENOUGH_MONEY, nur mit Gold
 #                     -> NOT_ENOUGH_BIND_MONEY (Rückfrage), mit gold = true gelernt (Gold - Kosten); eine zweite mit
@@ -38,6 +41,9 @@ const Npcs = preload("../server/npcs.gd")
 const HUNT_NEAR = 100.0 # m: so nah muss ein wählbares Monster sein, sonst erst zum Spawn-Gebiet laufen
 const DIR = "user://test_server/klassen"
 const DEFAULT_PORT = 29125
+const RACE_WOLF = 6
+const EDWARD = 44826 # Edward Olgen (15850 "Silberflügelherzog")
+const EDWARD_POS = Vector3(-194, 257, 336) # Server task_npc.data, Welt 31
 const MAPS = "s9,s10,s11,s31"
 const PASSWORD = "geheim-123"
 const LOOK = {"face": 1, "mask": 2, "hair": 3, "skin": 4, "hair_color": 0xD25720}
@@ -180,6 +186,17 @@ func _bot(b: Dictionary) -> void:
 		"Rassen-Segen %d erst ab Stufe %d: auf Stufe 1 unbekannt (Quest %d nicht vergeben), K-Liste Rasse beginnt mit ihm %s" % [
 		bless[1], BLESS_LEVEL, bless[0], str(race_ids)]])
 	await create_timer(1.5).timeout # NPCs in Sicht
+	var wr = await s.quest_where("npc", EDWARD, 0)
+	var wd: Dictionary = wr.get("data", {})
+	var at: Array = wd.get("pos", [])
+	var near = at.size() >= 3 and Vector3(at[0], at[1], at[2]).distance_to(EDWARD_POS) < 30.0
+	if int(c[0]) == RACE_WOLF:
+		b["done"].append([wr["code"] == Proto.Code.OK and str(wd.get("map", "")) == "s31" and int(wd.get("world", 0)) == b["world"]
+			and near, "Edward Olgen (quest_where npc %s): %s, Welt %s, %s" % [Proto.text(int(wr["code"])), str(wd.get("map", "")),
+			str(wd.get("world", "")), str(at)]])
+	else:
+		b["done"].append([wr["code"] == Proto.Code.OK and int(wd.get("world", 0)) == -1 and near,
+			"Edward Olgen von hier: anderes Gebiet (%s, Welt %s)" % [Proto.text(int(wr["code"])), str(wd.get("world", ""))]])
 	for id in b["skills"] + [PORTAL]:
 		var i: Dictionary = b["info"].get(str(id), {})
 		if not i.get("usable", false):

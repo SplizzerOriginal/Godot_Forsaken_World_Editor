@@ -43,8 +43,8 @@ extends Node
 #                    CDlgInventory / CDlgDragDrop: Btn_Destroy schaltet den Zerstören-Modus (Linksklick auf einen Platz),
 #                    Ziehen auf Btn_Destroy oder aus dem Fenster in die Welt; nicht zerstörbar (proc 0x400) -> Hinweis;
 #                    Qualität 4 - 7 und 9 fragt Win_Destroy (Schlüsselwort DESTORY_ITEM_KEY eintippen, sonst
-#                    INPUT_CONFIRM_ERR), die übrigen ein Meldungsfenster (gameui.stf 987; die Datei hat dort nur
-#                    Chinesisch -> erste Zeile von DESTORY_ITEM_CONFIRM); dann Signal destroy_requested
+#                    INPUT_CONFIRM_ERR), die übrigen ein Meldungsfenster (gameui.stf 987, übersetzt; fehlt er, die
+#                    erste Zeile von DESTORY_ITEM_CONFIRM); dann Signal destroy_requested
 #   Win_Character    Charakter (C oder Knopf "Figur", CDlgCharacter): Ausrüstungsplätze Equip_NN (NN =
 #                    EQUIP_INDEX_*), Rechtsklick / Ziehen in die Tasche legt ab; Name, Klasse und Stufe,
 #                    Leben / Mana, Angriff, Verteidigung, Treffer, Ausweichen, Krit-Werte (stats.attr des
@@ -62,12 +62,14 @@ extends Node
 #                    route_npc_requested), Klick auf den Titel öffnet links daneben Win_QuestMinionDes
 #                    (Ziel, Beschreibung, Belohnung), "-" / "+" klappt die Quest ein / aus. Statt der
 #                    AUI-Baumansicht ein RichTextLabel an ihrer Stelle (die Godot-Baumansicht kennt keine
-#                    Links im Text)
+#                    Links im Text). Rechtsklick auf eine Zeile -> Popup Win_QuestMinionOption ("Ansehen" öffnet
+#                    das Quest-Fenster mit der Quest, "Aufgeben" fragt nach)
 #   Win_Quest        Quest-Fenster (Q oder Knopf "Quest"): Tv_Quest mit den laufenden Quests, rechts
 #                    (Win_QuestContent) Ziel (NPC als Link), Beschreibung und Belohnung, "Aufgeben"
-#                    (nur mit giveup)
+#                    (nur mit giveup); Rechtsklick auf eine Quest -> Popup Win_QuestOption ("Aufgeben").
+#                    Aufgeben fragt immer erst (gameui.stf 236, Signal quest_abandon_requested erst nach OK)
 #   Win_NPC          NPC-Fenster (CDlgNPC): Gruß des NPCs, Quest-Einträge (quest_data.gd npc_entries)
-#                    mit Symbol, "Gespräch beenden"; ein Eintrag zeigt sein Gespräch (talk_proc: Fenster
+#                    mit Symbol (nicht annehmbare grau, NPC_GREY), "Gespräch beenden"; ein Eintrag zeigt sein Gespräch (talk_proc: Fenster
 #                    mit Text und Optionen; Option = nächstes Fenster bzw. Sonderbefehl: Quest geben /
 #                    abschließen / aufgeben -> Signal npc_option, zurück, beenden), "Zurück" zur Übersicht
 #   Win_Main1 - 4    Leisten oben; Knopf "System" öffnet das Systemmenü, die übrigen melden im Chat,
@@ -95,6 +97,9 @@ const MENU = "Quit"
 const NPC = "NPC"
 const QUEST = "Quest"
 const QUEST_DES = "QuestMinionDes"
+const QUEST_OPTION = "QuestOption" # Win_QuestOption: Rechtsklick auf eine Quest im Quest-Fenster (CDlgQuestOption)
+const QUEST_MINION_OPTION = "QuestMinionOption" # Win_QuestMinionOption: Rechtsklick in der Verfolgung (CDlgQuestMinionOption)
+const STF_ABANDON_ASK = 236 # gameui.stf "Wollt Ihr den ausgewählten Quest wirklich aufgeben?" (Game_AbortTask)
 const INVENTORY = "Inventory"
 const DESTROY = "Destroy" # Win_Destroy: Zerstören mit Schlüsselwort (CDlgDestroyItemConfirm)
 const DESTROY_ASK_QUALITY = [4, 5, 6, 7, 9] # diese Qualitäten fragen mit Schlüsselwort (CDlgDragDrop)
@@ -165,6 +170,7 @@ const TALK_RETURN = 0x80000011
 const TALK_EXIT = 0x80000012
 const TALK_GIVEUP_TASK = 0x80000015
 const STF_END_TALK = 503 # "Gespräch beenden" (CDlgNPC::PopupNPCDialog)
+const NPC_GREY = Color8(128, 128, 128) # Quest-Eintrag im NPC-Fenster: sichtbar, aber nicht annehmbar (CDlgNPC)
 const INFO_COLOR = "ffff00"
 const BOOK_TITLE = Color(0.45, 0.2, 0.0) # Quest-Buch: dunkle Schrift auf Pergament
 const BOOK_COLORS = {"title": "6e2f00", "part": "2a1a0a", "goal": "1d5c1d", "award": "6e2f00", "link": "#0a8f0a"} # Pergament
@@ -244,7 +250,7 @@ const TEXTS = {
 		"basic_pickup": "Aufheben", "basic_invite": "Einladen", "basic_leave": "Gruppe verlassen", "basic_trade": "Handeln",
 		"basic_stall": "Verkaufsstand", "basic_interrupt": "Zaubern abbrechen",
 		"skill_level": "Stufe %d", "not_yet": "Noch nicht verfügbar.", "self": "Ihr", "end_talk": "Gespräch beenden", "talk_to": "Sprecht mit %s", "return_to": "Zurück zu %s",
-		"quest_new": "Neue Quest: %s", "quest_done": "Quest erfüllt: %s", "quest_failed": "Quest gescheitert: %s",
+		"quest_new": "Neue Quest: %s", "quest_done": "Quest erfüllt: %s", "quest_failed": "Quest gescheitert: %s", "abandon_ask": "Wollt Ihr den ausgewählten Quest wirklich aufgeben?",
 		"gain_exp": "Ihr erhaltet %d EXP.", "gain_item": "Ihr erhaltet: %s x%d", "gain_gold": "Goldmünzen erhalten: %s.", "gain_bind": "Seelenmünzen erhalten: %s.",
 		"level_up": "Ihr habt Stufe %d erreicht!", "done_mark": "(erfüllt)", "quests_title": "Quests",
 		"desc": "Beschreibung:", "goal": "Ziel: %s", "award": "Belohnung: %s", "money": "Goldmünzen: %s", "bind": "Seelenmünzen: %s",
@@ -256,7 +262,7 @@ const TEXTS = {
 		"item_mp": "Mana: +%d", "item_hit": "Treffer: +%d", "item_range": "Reichweite: %.1f m", "item_lv": "Benötigt Stufe %d",
 		"item_prof": "Klasse: %s", "item_gender": "Geschlecht: %s", "genders": ["männlich", "weiblich"],
 		"item_race": "Eure Rasse kann das nicht tragen", "item_pile": "Anzahl: %d / %d", "item_price": "Verkaufswert: %d",
-		"gather": "Sammeln", "use": "Benutzen", "gather_none": "Nichts gefunden.", "prof_level": "%s  Stufe %d", "bag_full_quest": "Euer Inventar ist voll.",
+		"gather": "Sammeln", "use": "Benutzen", "dest_dist": " (ca. %d m)", "gather_none": "Nichts gefunden.", "prof_level": "%s  Stufe %d", "bag_full_quest": "Euer Inventar ist voll.",
 		"races": ["", "Mensch", "Elf", "Zwerg", "Steinmensch", "Kindred", "Werwolf"], "miss": "Verfehlt",
 		"skill_stopped": "Fertigkeit unterbrochen.", "immune": "Immun", "buff_time": ["%d h", "%d m", "%d s"], "buff_left": "Restzeit: %s",
 		"cant_destroy": "Dieser Gegenstand kann nicht zerstört werden."},
@@ -271,7 +277,7 @@ const TEXTS = {
 		"basic_pickup": "Pick up", "basic_invite": "Invite", "basic_leave": "Leave group", "basic_trade": "Trade",
 		"basic_stall": "Stall", "basic_interrupt": "Interrupt casting",
 		"skill_level": "Level %d", "not_yet": "Not available yet.", "self": "You", "end_talk": "End conversation", "talk_to": "Talk to %s", "return_to": "Return to %s",
-		"quest_new": "New quest: %s", "quest_done": "Quest completed: %s", "quest_failed": "Quest failed: %s",
+		"quest_new": "New quest: %s", "quest_done": "Quest completed: %s", "quest_failed": "Quest failed: %s", "abandon_ask": "Do you really want to abandon the selected quest?",
 		"gain_exp": "You receive %d EXP.", "gain_item": "You receive: %s x%d", "gain_gold": "Gold Coins received: %s.", "gain_bind": "Soul Coins received: %s.",
 		"level_up": "You have reached level %d!", "done_mark": "(done)", "quests_title": "Quests",
 		"desc": "Description:", "goal": "Goal: %s", "award": "Reward: %s", "money": "Gold Coins: %s", "bind": "Soul Coins: %s",
@@ -282,7 +288,7 @@ const TEXTS = {
 			"Ring"], "item_dmg": "Attack: %d - %d", "item_def": "Defense: %d", "item_hp": "Health: +%d", "item_mp": "Mana: +%d",
 		"item_hit": "Accuracy: +%d", "item_range": "Range: %.1f m", "item_lv": "Requires level %d", "item_prof": "Class: %s",
 		"item_gender": "Gender: %s", "genders": ["male", "female"], "item_race": "Your race cannot wear this",
-		"item_pile": "Count: %d / %d", "item_price": "Sell value: %d", "gather": "Gathering", "use": "Using", "gather_none": "Nothing found.",
+		"item_pile": "Count: %d / %d", "item_price": "Sell value: %d", "gather": "Gathering", "use": "Using", "dest_dist": " (approx. %d m)", "gather_none": "Nothing found.",
 		"prof_level": "%s  Level %d", "bag_full_quest": "Your inventory is full.",
 		"races": ["", "Human", "Elf", "Dwarf", "Stoneman", "Kindred", "Lycan"], "miss": "Miss",
 		"skill_stopped": "Skill interrupted.", "immune": "Immune", "buff_time": ["%d h", "%d m", "%d s"], "buff_left": "Time left: %s",
@@ -299,7 +305,7 @@ const TEXTS = {
 		"basic_stall": "Échoppe", "basic_interrupt": "Interrompre le sort",
 		"skill_level": "Niveau %d", "not_yet": "Pas encore disponible.", "self": "Vous", "end_talk": "Terminer la conversation",
 		"talk_to": "Parlez à %s", "return_to": "Retournez voir %s", "quest_new": "Nouvelle quête : %s", "quest_done": "Quête accomplie : %s",
-		"quest_failed": "Quête échouée : %s", "gain_exp": "Vous recevez %d EXP.", "gain_item": "Vous recevez : %s x%d",
+		"quest_failed": "Quête échouée : %s", "abandon_ask": "Voulez-vous vraiment abandonner la quête sélectionnée ?", "gain_exp": "Vous recevez %d EXP.", "gain_item": "Vous recevez : %s x%d",
 		"gain_gold": "Écus d'or reçus : %s.", "gain_bind": "Écus psy reçus : %s.", "level_up": "Vous avez atteint le niveau %d !", "done_mark": "(accomplie)",
 		"quests_title": "Quêtes", "desc": "Description :", "goal": "Objectif : %s", "award": "Récompense : %s",
 		"money": "Écus d'or : %s", "bind": "Écus psy : %s", "route_start": "Itinéraire automatique vers %s (%d m).",
@@ -311,7 +317,7 @@ const TEXTS = {
 		"item_mp": "PM : +%d", "item_hit": "Précision : +%d", "item_range": "Portée : %.1f m", "item_lv": "Niveau requis %d",
 		"item_prof": "Classe : %s", "item_gender": "Sexe : %s", "genders": ["masculin", "féminin"],
 		"item_race": "Votre race ne peut pas porter cet objet", "item_pile": "Nombre : %d / %d",
-		"item_price": "Valeur de vente : %d", "gather": "Récolte", "use": "Utilisation", "gather_none": "Rien trouvé.", "prof_level": "%s  Niveau %d",
+		"item_price": "Valeur de vente : %d", "gather": "Récolte", "use": "Utilisation", "dest_dist": " (env. %d m)", "gather_none": "Rien trouvé.", "prof_level": "%s  Niveau %d",
 		"bag_full_quest": "Votre inventaire est plein.",
 		"races": ["", "Humain", "Elfe", "Nain", "Homme de pierre", "Kindred", "Lycan"], "miss": "Raté",
 		"skill_stopped": "Compétence interrompue.", "immune": "Immunisé", "buff_time": ["%d h", "%d m", "%d s"], "buff_left": "Temps restant : %s",
@@ -441,6 +447,8 @@ var quest_selected = 0
 var trace_entries: Array = [] # Einträge der Verfolgung (quest_data.gd trace)
 var trace_folded = {} # Quest -> true (eingeklappt)
 var des_quest = 0 # Quest in Win_QuestMinionDes
+var option_quest = 0 # Quest des offenen Popups Win_QuestOption / Win_QuestMinionOption
+var _trace_line_quest: Array = [] # je Zeile (Absatz) der Verfolgung ihre Quest
 var route_target = null # Vector3: Ziel der Autoroute (Minimap)
 var _trace_label: RichTextLabel
 var _radar_pos = Vector3.ZERO
@@ -510,7 +518,7 @@ func setup(data_root: String, p_language: String, p_skin: int, p_map: String, wo
 		if aui.load_layout("%dgameui" % skin) == 0:
 			return "Dialog-Liste gameui fehlt"
 	for short in SHOWN + TARGETS.values() + [MENU, NPC, QUEST, QUEST_DES, INVENTORY, CHARACTER, PROGRESS, REVIVE, SKILLS, NEW_SKILLS,
-			BASE_SKILLS, TALENT_HINT, LVUP, DESTROY, CHARACTER_DETAIL]:
+			BASE_SKILLS, TALENT_HINT, LVUP, DESTROY, CHARACTER_DETAIL, QUEST_OPTION, QUEST_MINION_OPTION]:
 		var d = aui.dialog("%d%s.xml" % [skin, short])
 		if d == null:
 			warnings.append("Dialog %d%s.xml fehlt" % [skin, short])
@@ -1088,9 +1096,17 @@ func _on_command(cmd: String, short: String) -> void:
 				char_page(CHARACTER_DETAIL)
 		QUEST:
 			if cmd == "abandon" and quest_selected != 0:
-				quest_abandon_requested.emit(quest_selected)
+				ask_abandon(quest_selected)
 			elif cmd in ["IDCANCEL", "Btn_Close"]:
 				close_quests()
+		QUEST_OPTION, QUEST_MINION_OPTION:
+			var id = option_quest
+			close_quest_option()
+			if cmd == "Btn_Abandon" and id != 0:
+				ask_abandon(id)
+			elif cmd == "Btn_Info" and id != 0:
+				open_quests()
+				select_quest(id)
 		NPC:
 			if cmd == "back":
 				_npc_main()
@@ -1174,7 +1190,9 @@ func _npc_main() -> void:
 	list.clear()
 	_npc_options = []
 	for e in npc_entries:
-		list.add_item(e["title"], e.get("icon"))
+		var at = list.add_item(e["title"], e.get("icon"))
+		if e.get("grey", false): # sichtbar, aber nicht annehmbar: grau wie CDlgNPC (A3DCOLORRGB(128, 128, 128))
+			list.set_item_custom_fg_color(at, NPC_GREY)
 		_npc_options.append(["entry", e])
 	list.add_item(_end_talk())
 	_npc_options.append(["exit"])
@@ -1200,7 +1218,8 @@ func _npc_window(win_id: int) -> void:
 		_npc_options.append(["exit"])
 	d.show_item("Btn_Back", true)
 
-# "Gespräch beenden" aus der Texttabelle (503); dort steht in Deu / Eng / Franz noch "再见。"
+# "Gespräch beenden" aus der Texttabelle (503, übersetzt aus gameui.stf: "Bis dann." / "See you." / "Au revoir."; die
+# Skin-Tabelle allein hätte "再见。")
 func _end_talk() -> String:
 	var end = aui.text(STF_END_TALK)
 	var re = RegEx.new()
@@ -1258,6 +1277,8 @@ func _setup_quest() -> void:
 	if tree != null:
 		tree.item_selected.connect(func(): _show_quest(int(tree.get_selected().get_metadata(0))))
 		tree.focus_mode = Control.FOCUS_NONE
+		tree.gui_input.connect(_on_quest_tree_input.bind(tree))
+	_setup_quest_options()
 	var head = d.item("Txt_QuestItem") as RichTextLabel
 	if head != null:
 		head.meta_clicked.connect(_on_link)
@@ -1340,6 +1361,102 @@ func _show_quest(id: int) -> void:
 	_link_markers(d.item("Txt_Content"), BOOK_COLORS["link"])
 	d.enable_item("Btn_Abandon", e.get("giveup", false))
 
+# Quest im offenen Quest-Fenster auswählen (CDlgTask::SelectTaskItem, z.B. "Ansehen" im Popup der Verfolgung)
+func select_quest(id: int) -> void:
+	var tree = dlg(QUEST).item("Tv_Quest") as Tree if dlg(QUEST) != null else null
+	if tree == null or tree.get_root() == null:
+		return
+	for it in tree.get_root().get_children():
+		if int(it.get_metadata(0)) == id:
+			it.select(0)
+			_show_quest(id)
+			return
+
+# Aufgeben erst nach Rückfrage (MessageBox "Game_AbortTask", gameui.stf 236), dann an den Server
+func ask_abandon(id: int) -> void:
+	if aui.has_message_box():
+		return
+	var ask = aui.text(STF_ABANDON_ASK)
+	if await aui.message_box(_plain(ask if ask != "" else texts()["abandon_ask"]), AuiManager.MB_OKCANCEL) == "IDOK":
+		quest_abandon_requested.emit(id)
+
+
+# ====================================================
+# POPUPS: Win_QuestOption (Rechtsklick im Quest-Fenster: Verfolgen, Aufgeben, Schließen) und Win_QuestMinionOption
+# (Rechtsklick in der Verfolgung: Verfolgung abbrechen, Aufgeben, Ansehen, Schließen) - PopupDialog an der Maus, ein Klick
+# daneben schließt. Verfolgen / Verfolgung abbrechen gibt es nur bei manueller Verfolgung (TRACE_MANUAL); wir verfolgen
+# alle Quests (wie TRACE_AUTO), daher sind sie wie im Original dann gesperrt.
+# ====================================================
+func _setup_quest_options() -> void:
+	for short in [QUEST_OPTION, QUEST_MINION_OPTION]:
+		var d = dlg(short)
+		if d == null:
+			continue
+		d.enable_item("Btn_Focus", false)
+		d.enable_item("Btn_Delete", false)
+
+func quest_option_open() -> String:
+	for short in [QUEST_OPTION, QUEST_MINION_OPTION]:
+		if dialogs.has(short) and dialogs[short].visible:
+			return short
+	return ""
+
+func open_quest_option(short: String, id: int, at: Vector2) -> void:
+	close_quest_option()
+	var d = dlg(short)
+	if d == null or id == 0:
+		return
+	option_quest = id
+	aui.show_dialog(d)
+	# an der Maus (SetPosEx(x, y)), ganz im Bild
+	var local = (d.get_parent() as Control).get_global_transform().affine_inverse() * at
+	var room = (d.get_parent() as Control).size - d.size
+	d.position = Vector2(clampf(local.x, 0.0, maxf(0.0, room.x)), clampf(local.y, 0.0, maxf(0.0, room.y)))
+
+func close_quest_option() -> void:
+	for short in [QUEST_OPTION, QUEST_MINION_OPTION]:
+		if dialogs.has(short) and dialogs[short].visible:
+			aui.hide_dialog(dialogs[short])
+	option_quest = 0
+
+func _on_quest_tree_input(event: InputEvent, tree: Tree) -> void:
+	var mb = event as InputEventMouseButton
+	if mb == null or not mb.pressed or mb.button_index != MOUSE_BUTTON_RIGHT:
+		return
+	var it = tree.get_item_at_position(mb.position)
+	if it != null:
+		open_quest_option(QUEST_OPTION, int(it.get_metadata(0)), mb.global_position)
+		tree.accept_event()
+
+# Rechtsklick auf eine Zeile der Verfolgung -> ihre Quest
+func _on_trace_input(event: InputEvent) -> void:
+	var mb = event as InputEventMouseButton
+	if mb == null or not mb.pressed or mb.button_index != MOUSE_BUTTON_RIGHT:
+		return
+	var id = trace_quest_at(mb.position.y)
+	if id != 0:
+		open_quest_option(QUEST_MINION_OPTION, id, mb.global_position)
+		_trace_label.accept_event()
+
+# Quest der Verfolgungszeile auf Höhe y (Pixel im Textfeld, mit Bildlauf) oder 0
+func trace_quest_at(y: float) -> int:
+	if _trace_label == null or _trace_line_quest.is_empty():
+		return 0
+	var at = y + _trace_label.get_v_scroll_bar().value
+	var found = -1
+	for i in mini(_trace_label.get_paragraph_count(), _trace_line_quest.size()):
+		if _trace_label.get_paragraph_offset(i) <= at:
+			found = i
+		else:
+			break
+	return int(_trace_line_quest[found]) if found >= 0 else 0
+
+# Klick neben ein offenes Popup schließt es (AUI PopupDialog)
+func _close_popup_outside(mb: InputEventMouseButton) -> void:
+	var short = quest_option_open()
+	if short != "" and not dialogs[short].get_global_rect().has_point(mb.position):
+		close_quest_option()
+
 
 # ====================================================
 # QUEST-VERFOLGUNG (Win_QuestMinion: Tv_TraceContent, Txt_ShuLiang) UND Win_QuestMinionDes
@@ -1367,6 +1484,7 @@ func _setup_trace() -> void:
 	_trace_label.add_theme_constant_override("outline_size", 3)
 	_trace_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.8))
 	_trace_label.meta_clicked.connect(_on_link)
+	_trace_label.gui_input.connect(_on_trace_input)
 	tree.get_parent().add_child(_trace_label)
 	tree.visible = false
 	var des = dlg(QUEST_DES)
@@ -1395,20 +1513,22 @@ func set_trace(entries: Array) -> void:
 	if _trace_label == null:
 		return
 	var lines = PackedStringArray()
+	_trace_line_quest = []
 	for e in entries:
 		var id = int(e["id"])
 		var folded = trace_folded.get(id, false)
 		lines.append("[url=fold:%d]%s[/url] [url=quest:%d][color=%s]%s[/color][/url]" % [id, "+" if folded else "-", id,
 			TRACE_TITLE_HEX, _bb(_plain(str(e["name"])))])
-		if folded:
-			continue
-		if str(e.get("part", "")) != "":
-			lines.append("   " + _bb(_plain(str(e["part"]))) + ((" " + texts()["done_mark"]) if e.get("done", false) else ""))
-		if str(e.get("goal", "")) != "":
-			var where: Array = e.get("where", [])
-			lines.append("   " + _goal_bb(e) + ((" (%s)" % _pos_link(where, LINK_COLOR)) if not where.is_empty() else ""))
-		if int(e.get("back", 0)) != 0:
-			lines.append("   " + _back_bb(e, LINK_COLOR))
+		if not folded:
+			if str(e.get("part", "")) != "":
+				lines.append("   " + _bb(_plain(str(e["part"]))) + ((" " + texts()["done_mark"]) if e.get("done", false) else ""))
+			if str(e.get("goal", "")) != "":
+				var where: Array = e.get("where", [])
+				lines.append("   " + _goal_bb(e) + ((" (%s)" % _pos_link(where, LINK_COLOR)) if not where.is_empty() else ""))
+			if int(e.get("back", 0)) != 0:
+				lines.append("   " + _back_bb(e, LINK_COLOR))
+		while _trace_line_quest.size() < lines.size():
+			_trace_line_quest.append(id)
 	_trace_label.text = "\n".join(lines)
 	if des_open():
 		_show_des(des_quest)
@@ -1553,6 +1673,8 @@ func _show_des(id: int) -> void:
 # Mausrad über der Liste des K-Fensters: scrollen (statt die Kamera zu zoomen)
 func _input(event: InputEvent) -> void:
 	var mb = event as InputEventMouseButton
+	if mb != null and mb.pressed and mb.button_index in [MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT]:
+		_close_popup_outside(mb)
 	if mb == null or not mb.pressed or not mb.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
 		return
 	var d = dlg(SKILLS)
@@ -1592,7 +1714,9 @@ func handle_key(k: InputEventKey) -> bool:
 				open_chat()
 				return true
 		KEY_ESCAPE:
-			if destroy_open():
+			if quest_option_open() != "":
+				close_quest_option()
+			elif destroy_open():
 				close_destroy()
 			elif destroy_mode:
 				set_destroy_mode(false)

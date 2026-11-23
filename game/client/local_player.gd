@@ -20,7 +20,8 @@ extends CharacterBody3D
 # Animationen: Stehen, Gehen, Rennen, Springen (Start, Schleife, Landen).
 # Gewurzelt / betäubt (rooted, Siegel root vom Server wie LIES_ROOT): keine Bewegung, kein Sprung; Klickziel und
 # Autoroute enden (route_finished(false)). Ansturm: dash(Ziel, s) gleitet in der Zeit dorthin (Eingaben ruhen).
-# Schleifen-Aktionen einer Fertigkeit (Name mit 循环, z.B. das Stadtportal) laufen bis stop_once.
+# Schleifen-Aktionen einer Fertigkeit (Name mit 循环, z.B. das Stadtportal) laufen bis stop_once; mehrteilige Aktionen
+# (Sammeln: Start, Schleife, Ende) über play_segment / end_segment.
 # Kampfzustand (wie CECPlayer::SetIsFighting(true, 6000)): mark_fight() bei Angriff und Treffer, bis
 # FIGHT_TIME s nach dem letzten; dann hängen die Waffen in der Hand (angelica_player.gd place_weapons),
 # Stehen / Rennen sind 战斗站立 / 战斗奔跑_<Waffenart>; danach wieder Rücken bzw. Gürtel.
@@ -44,6 +45,7 @@ const WAYPOINT_REACHED = 0.6 # m: nächster Wegpunkt
 const ROUTE_STUCK_TIME = 1.2 # s
 const ROUTE_STUCK_MOVE = 0.3 # m in dieser Zeit
 const STEP_HEIGHT = 0.8 # m: höchste Stufe, die die Figur beim Laufen nimmt (m_MoveConst.fStepHei)
+const COLLISION_EXTENTS = Vector3(0.3, 0.76, 0.3) # halbe Maße der Kollisionsbox (PlayerUtil::vPlayerAABBOrgExts)
 const ANIM = {"stand": "站立_通用", "walk": "行走_通用", "run": "奔跑_通用", "jump_start": "跳跃起_通用",
 	"jump_loop": "跳跃循环_通用", "land": "跳跃落地_通用"}
 const FIGHT_ANIM = {"stand": "战斗站立_%s", "run": "战斗奔跑_%s"} # Waffenart
@@ -62,7 +64,7 @@ var cam_yaw: Node3D
 var cam_pitch: Node3D
 var arm: SpringArm3D
 var height = 1.8
-var radius = 0.3 # Kapsel (setup)
+var radius = 0.3 # Kapsel (setup, COLLISION_EXTENTS.x)
 var target = null # Klickziel (Vector3) oder null
 var state = Proto.MOVE_STAND
 var input_enabled = true
@@ -74,6 +76,7 @@ var rooted = false # Siegel root (Meldung seal): stehen bleiben
 var _dash = {} # Ansturm: {from, to, t, time}
 var _fight_until = 0 # ms
 var _once = "" # laufende Einmal-Aktion (Angriff, Treffer)
+var _seg_loop = "" # Schleife einer mehrteiligen Aktion (Sammeln: Start, Schleife, Ende), die auf ihren Start folgt
 var _attack_seq = 1
 var _was_moving = false
 var path = PackedVector3Array() # Autoroute: Wegpunkte (x, z zählen)
@@ -92,13 +95,17 @@ func setup(p_model: Node3D, p_height: float) -> void:
 	height = p_height
 	add_child(model)
 	anim = model.get_node_or_null("AnimationPlayer")
+	# Kollision wie das Original: feste Box PlayerUtil::vPlayerAABBOrgExts (halbe Maße 0,3 / 0,76 / 0,3 = 0,6 x 1,52 m,
+	# CECHostPlayer m_pCDRInfo->vExtent), unabhängig von der Modellhöhe - hier als Kapsel gleicher Breite und Höhe. Mit der
+	# Modellhöhe (~1,8 - 2 m) stieß die Figur unter niedrigen Balken an (Bude litmodel_2750 am Wiederbelebungspunkt von s9,
+	# Unterkante 1,83 m), wo die Wegekarte des Servers begehbar sagt -> Autoroute steckte fest (Bug-Fahrplan B2)
 	var capsule = CapsuleShape3D.new()
-	capsule.radius = clampf(height * 0.18, 0.25, 0.5)
-	capsule.height = height
+	capsule.radius = COLLISION_EXTENTS.x
+	capsule.height = COLLISION_EXTENTS.y * 2.0
 	radius = capsule.radius
 	var cs = CollisionShape3D.new()
 	cs.shape = capsule
-	cs.position.y = height / 2.0
+	cs.position.y = COLLISION_EXTENTS.y
 	add_child(cs)
 	collision_layer = 2 # Ebene 1 = Terrain und Gebäude (Bodenstrahlen der NPCs)
 	floor_snap_length = 0.6
@@ -144,7 +151,33 @@ func play_skill(act: String) -> float:
 # Laufende Einmal-Aktion beenden (Zaubern abgebrochen)
 func stop_once() -> void:
 	_once = ""
+	_seg_loop = ""
 	_animate()
+
+# Mehrteilige Aktion wie CECPlayer::PlaySegmentedAction (B10, Sammeln: 采矿开始 -> 采矿循环 ...): Start einmal, dann die
+# Schleife bis end_segment / stop_once; fehlt der Start, gleich die Schleife -> false ohne Schleife
+func play_segment(start: String, loop: String) -> bool:
+	if anim == null or dead or loop == "" or not anim.has_animation(loop):
+		return false
+	anim.get_animation(loop).loop_mode = Animation.LOOP_LINEAR
+	_seg_loop = loop
+	if start != "" and anim.has_animation(start):
+		anim.play(start, 0.15)
+		anim.queue(loop)
+		_once = start
+	else:
+		anim.play(loop, 0.15)
+		_once = loop
+	return true
+
+# Ende der mehrteiligen Aktion (Sammeln fertig): Ende einmal, danach wieder Stehen
+func end_segment(end: String) -> void:
+	_seg_loop = ""
+	if anim != null and not dead and end != "" and anim.has_animation(end):
+		anim.play(end, 0.15)
+		_once = end
+	else:
+		stop_once()
 
 func play_hurt() -> void:
 	if state == Proto.MOVE_STAND and _once == "" and not dead:
@@ -384,9 +417,12 @@ func _animate() -> void:
 	if anim == null or dead:
 		return
 	if _once != "":
+		if _seg_loop != "" and _once != _seg_loop and anim.current_animation == _seg_loop and state == Proto.MOVE_STAND:
+			_once = _seg_loop # Start fertig, die Schleife läuft
 		if anim.current_animation == _once and anim.is_playing() and state == Proto.MOVE_STAND:
 			return
 		_once = ""
+		_seg_loop = ""
 	var current = anim.current_animation
 	if state == Proto.MOVE_JUMP:
 		if current != ANIM["jump_start"] or not anim.is_playing():

@@ -24,12 +24,19 @@ extends RefCounted
 #   mine      Sammeln an einem Punkt mit task_out (inventory.gd, CheckMining): läuft die Quest mit
 #             Methode 2, kommt ihr erster gesuchter Gegenstand (1 Stück) in die Tasche, solange noch
 #             welche fehlen; Abschluss "sofort" (f 0) ist dann erfüllt, sobald alle da sind
-#             (check_items, auch nach jeder Belohnung). Die gesammelten Gegenstände bleiben (die
-#             Quests hier haben kein m_bClearAcquired).
-#   abandon   nur Quests der obersten Ebene mit giveup; gilt als gescheitert
+#             (check_items, auch nach jeder Belohnung). Beim Abschluss mit clear (m_bClearAcquired) nimmt die Quest
+#             die gesuchten Gegenstände mit deposit (dep) wieder weg (RemoveAcquiredItem: Quest-Gegenstände alle, sonst
+#             höchstens num), die übrigen bleiben (B17: 15766 nimmt das Blut des Werwolfgottes).
+#   abandon   nur Quests der obersten Ebene mit giveup (Client: Rechtsklick in Questbuch / Verfolgung, CDlgQuestOption);
+#             gilt als gescheitert, mit giveup_clear (m_bClearAsGiveUp) verschwindet sie ganz. Bei Misserfolg und Aufgeben
+#             zieht die Quest ihre Gegenstände ein (_take_back: mit clear gesammelte / erbeutete, dazu mitgegebene -
+#             RecursiveClearTask). Danach ist sie mit redo_fail wieder annehmbar (z.B. 15396 "Lauscht dem Ruf" am Grab)
 #   tick      Methode 5 "Warten": erfüllt nach wait s (und mit fin_buffs); Zeitlimit (time): gescheitert
 #   Methode 11 "Quest mehrmals erfüllen" (fin [Quest, Anzahl]): zählt, wie oft die Quest erfüllt wird, solange diese
-#             läuft (Fortschritt n); Abschluss beim NPC erst mit fin_buffs (Effekte wie buffs, m_FinBuff)
+#             läuft (Fortschritt n); Abschluss erst mit fin_buffs (Effekte wie buffs, m_FinBuff), beim NPC (f 1) bzw.
+#             mit Abschluss "sofort" (f 0) gleich beim Zählen und in tick (_auto_done, B20)
+# need_buffs (B20, Wunsch des Spielers, nicht aus den Original-Daten): Effekte, die zur Vergabe da sein müssen, ohne dass
+# die Quest unsichtbar wird (der Client zeigt ein graues "!") - 15396 "Lauscht dem Ruf" erst mit dem Blut-Effekt 2886
 # Abschluss einer Unteraufgabe: psucc -> auch die Eltern-Quest erfüllt; sonst der Reihe nach die
 # nächste, ohne nächste bzw. wenn alle erfüllt sind die Eltern-Quest; Misserfolg mit pfail auch.
 # Belohnung je erfüllter Quest: EXP (mit exp_lev * Stufenfaktor task_factor, stats.gd task_exp; Stufenaufstieg mit
@@ -74,6 +81,7 @@ var stats # stats.gd
 var inventory = null # inventory.gd (setzt der Server)
 var buffs = null # buffs.gd (setzt der Server): Prozent-Werte der Effekte nach dem Stufenaufstieg neu
 var skills = null # skills.gd (setzt der Server): Fertigkeiten aus Belohnungen (award skill / del_skill)
+var casting = null # skill_cast.gd (setzt der Server): Effekt-Belohnungen (award buff, deliver_buff)
 var on_level_up: Callable # (p) nach einem Stufenaufstieg (skills.gd auto_learn bis Stufe 20)
 var tasks = {} # ID -> Quest (quest_templates.json)
 var npc_out = {} # NPC-Vorlage -> [Quest-IDs]
@@ -229,6 +237,8 @@ func can_deliver(p: Dictionary, id: int) -> int:
 	if t.has("cotask") and not _cotask_ok(p, t):
 		return Proto.Code.QUEST_CONDITIONS
 	if t.has("buffs") and not buffs_ok(p, t["buffs"], t.get("buffs_all", false)):
+		return Proto.Code.QUEST_CONDITIONS
+	if t.has("need_buffs") and not buffs_ok(p, t["need_buffs"], true):
 		return Proto.Code.QUEST_CONDITIONS
 	if not _given_room(p, id):
 		return Proto.Code.QUEST_BAG_FULL
@@ -410,7 +420,14 @@ func abandon(peer: int, p: Dictionary, id: int) -> Array:
 		return [Proto.Code.QUEST_NOT_ACTIVE, {}]
 	if not t.get("giveup", false):
 		return [Proto.Code.QUEST_NO_GIVEUP, {}]
-	finish(peer, p, id, false)
+	if t.get("giveup_clear", false):
+		# m_bClearAsGiveUp: die Quest verschwindet ganz (ClearTask), ohne Misserfolg im Verlauf; Gegenstände wie beim Misserfolg
+		_take_back(peer, p, _clear_subtree(p, id))
+		log_line.call("Quest: %s gibt %d '%s' auf" % [p["name"], id, t.get("name", "")])
+		_push_state(peer, p)
+		auto_deliver(peer, p)
+	else:
+		finish(peer, p, id, false)
 	return [Proto.Code.OK, {"id": id}]
 
 # Ziel einer Quest ohne Unteraufgaben erreicht? (3 NPC ansprechen: ja; 5 Warten: Zeit um;
@@ -520,8 +537,10 @@ func finish(peer: int, p: Dictionary, id: int, ok: bool) -> void:
 	var t = task(id)
 	var q: Dictionary = p["quests"]
 	var now = _now()
-	_clear_subtree(p, id)
+	var cleared = _clear_subtree(p, id)
 	var award = {}
+	if not ok:
+		_take_back(peer, p, cleared)
 	if ok:
 		award = _award(peer, p, t)
 		if t.get("clear", false) and int(t.get("m", 0)) == 1 and inventory != null:
@@ -529,6 +548,16 @@ func finish(peer: int, p: Dictionary, id: int, ok: bool) -> void:
 			for m in t.get("mon", []):
 				if int(m.get("drop", 0)) != 0:
 					taken += inventory.remove(p, int(m["drop"]), int(m["drop_num"]))
+			if taken > 0:
+				inventory.push(peer, p)
+		elif t.get("clear", false) and int(t.get("m", 0)) == 2 and inventory != null:
+			# RemoveAcquiredItem: gesuchte Gegenstände mit deposit (dep) einziehen, Quest-Gegenstände alle, sonst höchstens num
+			# (z.B. 15766 "Ruf des Werwolfgottes" nimmt das Blut 44134); ohne dep bleiben sie (z.B. gesammelte Ausrüstung)
+			var taken = 0
+			for it in t.get("items", []):
+				if it.get("dep", false):
+					var have = inventory.count_of(p, int(it["id"]))
+					taken += inventory.remove(p, int(it["id"]), have if it.get("task", false) else mini(have, int(it["num"])))
 			if taken > 0:
 				inventory.push(peer, p)
 	if not t.has("p"):
@@ -549,7 +578,7 @@ func finish(peer: int, p: Dictionary, id: int, ok: bool) -> void:
 		log_line.call("Quest: %s %s %d '%s'%s" % [p["name"], "erfüllt" if ok else "scheitert an", id, t.get("name", ""),
 			(" (+%d EXP)" % award.get("exp", 0)) if award.get("exp", 0) else ""])
 		if ok:
-			_count_finish(p, id)
+			_count_finish(peer, p, id)
 		if ok and int(t.get("award", {}).get("new", 0)) != 0:
 			var nid = int(t["award"]["new"])
 			if can_deliver(p, nid) == Proto.Code.OK:
@@ -590,8 +619,10 @@ func finish(peer: int, p: Dictionary, id: int, ok: bool) -> void:
 			return
 	finish(peer, p, parent_id, true)
 
-# Methode 11: laufende Quests, die auf das Erfüllen von id warten, zählen mit (Fortschritt n)
-func _count_finish(p: Dictionary, id: int) -> void:
+# Methode 11: laufende Quests, die auf das Erfüllen von id warten, zählen mit (Fortschritt n); mit Abschluss "sofort"
+# (f 0) ist die Quest dann gleich erfüllt (B20: z.B. 15708 "Ausbreitung des Lebens" nach 15411 "Segen der Erde (Säen)")
+func _count_finish(peer: int, p: Dictionary, id: int) -> void:
+	var counted = []
 	for qid in p["quests"]["active"]:
 		var w = task(qid)
 		if int(w.get("m", 0)) == 11 and w.has("fin") and int(w["fin"][0]) == id:
@@ -600,15 +631,65 @@ func _count_finish(p: Dictionary, id: int) -> void:
 				e["p"]["n"] = int(e["p"].get("n", 0)) + 1
 				_save_row(p, qid, ACTIVE, e["p"], e["t"], null, 0)
 				log_line.call("Quest: %s zählt für %d '%s' (%d/%d)" % [p["name"], qid, w.get("name", ""), e["p"]["n"], int(w["fin"][1])])
+				counted.append(qid)
+	for qid in counted:
+		if _auto_done(p, qid):
+			finish(peer, p, qid, true)
+
+# Ziel "Quest erfüllen" (Methode 11) erreicht und ohne NPC abzuschließen (f 0, keine Unteraufgaben, Effekte beim Abschluss,
+# Platz für die Belohnung)? Wie im Original mit Abschluss "sofort" (enumTFTDirect)
+func _auto_done(p: Dictionary, id: int) -> bool:
+	var t = task(id)
+	return p["quests"]["active"].has(id) and int(t.get("m", 0)) == 11 and int(t.get("f", 0)) == 0 and t.get("s", []).is_empty() \
+		and _goal_reached(p, id) and (not t.has("fin_buffs") or buffs_ok(p, t["fin_buffs"], t.get("fin_buffs_all", false))) \
+		and _bag_room(p, id)
 
 # Laufende Einträge einer Quest und ihrer Unteraufgaben entfernen
-func _clear_subtree(p: Dictionary, id: int) -> void:
+# Quest und laufende Unteraufgaben aus der Liste -> die entfernten IDs (die Quest selbst zuerst)
+func _clear_subtree(p: Dictionary, id: int) -> Array:
 	var q: Dictionary = p["quests"]
+	var out = []
 	if q["active"].has(id):
 		q["active"].erase(id)
 		db.run("DELETE FROM quests WHERE character_id = ? AND task_id = ? AND state = ?", [p["id"], id, ACTIVE])
+		out.append(id)
 	for s in task(id).get("s", []):
-		_clear_subtree(p, int(s))
+		out.append_array(_clear_subtree(p, int(s)))
+	return out
+
+# Misserfolg / Aufgeben: Gegenstände der Quests ids einziehen wie ActiveTaskList::RecursiveClearTask (mit clear
+# RemoveAcquiredItem ohne Erfolg: gesammelte mit dep - Quest-Gegenstände alle, gewöhnliche höchstens num und nicht mit
+# keep_cmn -, erbeutete Quest-Gegenstände alle, gewöhnliche höchstens drop_num; dann TakeAwayGivenItems ohne Erfolg:
+# mitgegebene Quest-Gegenstände alle, gewöhnliche höchstens num) -> Anzahl eingezogener Stück
+func _take_back(peer: int, p: Dictionary, ids: Array) -> int:
+	if inventory == null:
+		return 0
+	var take = [] # [Gegenstand, Höchstzahl; 0 / -1 = alle]
+	for id in ids:
+		var t = task(int(id))
+		if t.get("clear", false):
+			if int(t.get("m", 0)) == 1:
+				for m in t.get("mon", []):
+					if int(m.get("drop", 0)) != 0:
+						take.append([int(m["drop"]), int(m.get("drop_num", 0)) if m.get("common", false) else -1])
+			elif int(t.get("m", 0)) == 2:
+				for it in t.get("items", []):
+					if it.get("task", false):
+						take.append([int(it["id"]), -1])
+					elif it.get("dep", false) and not t.get("keep_cmn", false):
+						take.append([int(it["id"]), int(it.get("num", 0))])
+		for it in t.get("given", []):
+			if it.get("task", false) or int(it.get("num", 0)) > 0:
+				take.append([int(it["id"]), -1 if it.get("task", false) else int(it["num"])])
+	var taken = 0
+	for e in take:
+		var have = inventory.count_of(p, e[0])
+		var n = have if e[1] <= 0 else mini(have, e[1])
+		if n > 0:
+			taken += inventory.remove(p, e[0], n)
+	if taken > 0:
+		inventory.push(peer, p)
+	return taken
 
 # Belohnung einer erfüllten Quest -> {exp, gold, items: [[ID, Anzahl]]}
 func _award(peer: int, p: Dictionary, t: Dictionary) -> Dictionary:
@@ -641,6 +722,10 @@ func _award(peer: int, p: Dictionary, t: Dictionary) -> Dictionary:
 	if skills != null and sk.size() == 2 and int(p.get("skills", {}).get(int(sk[0]), 0)) < int(sk[1]):
 		skills.learn(peer, p, int(sk[0]), int(sk[1])) # z.B. Rassen-Segen (Segen der Menschen 8702 ...)
 		out["skill"] = [int(sk[0]), int(sk[1])]
+	var bf: Array = a.get("buff", [])
+	if casting != null and bf.size() == 2: # DeliverBuff: z.B. 15790 "Wunsch der Ahnen" -> Effekt 2885 (Werwolf-Kette, B17)
+		if casting.deliver_buff(p, int(bf[0]), int(bf[1])) > 0:
+			out["buff"] = [int(bf[0]), int(bf[1])]
 	var xp = Stats.task_exp(int(a.get("exp", 0)), int(a.get("exp_lev", 0)), a.get("exp_fix", false), int(p["level"]),
 		stats.task_factor if stats != null else [])
 	if xp != 0:
@@ -780,6 +865,8 @@ func tick(peer: int, p: Dictionary) -> void:
 		if int(t.get("m", 0)) == 5 and t.get("s", []).is_empty() and now >= int(e["p"].get("until", 0)):
 			if _bag_room(p, id) and (not t.has("fin_buffs") or buffs_ok(p, t["fin_buffs"], t.get("fin_buffs_all", false))):
 				finish(peer, p, id, true) # z.B. 15791 "Werwolfanbetung": erst mit den Effekten 2885 und 2886
+		elif _auto_done(p, id):
+			finish(peer, p, id, true) # Methode 11 erreicht (auch Spielstände von vor B20, die bei n = Anzahl stehen blieben)
 		elif int(t.get("time", 0)) > 0 and now - int(e["t"]) > int(t["time"]):
 			finish(peer, p, id, false)
 

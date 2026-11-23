@@ -8,7 +8,7 @@ func execute(root_node: Node):
 		push_warning("Keine Nodes mit der ID 110 gefunden!")
 		return
 		
-	var undo_redo = EditorInterface.get_editor_undo_redo()
+	var undo_redo = Engine.get_singleton(&"EditorInterface").get_editor_undo_redo() # nur im Editor (Klasse fehlt im Export)
 	undo_redo.create_action("Create SpeedTrail Plane for ID_110")
 	
 	# 1. Nodes nach Parent gruppieren
@@ -144,7 +144,7 @@ func _create_sprite_with_shader(parent_node: Node3D, root_node: Node, undo_redo,
 	if parsed_data.has("Width"): w = float(parsed_data["Width"]) * 2.0
 	if parsed_data.has("Height"): h = float(parsed_data["Height"]) * 2.0
 	plane_mesh.size = Vector2(w, h) 
-	plane_mesh.subdivide_width = 50 
+	plane_mesh.subdivide_width = 96 # Querschnitte über die aktive Zeit (sichtbar nur SegLife davon)
 	plane_mesh.subdivide_depth = 2
 	mesh_instance.mesh = plane_mesh
 	
@@ -157,13 +157,12 @@ func _create_sprite_with_shader(parent_node: Node3D, root_node: Node, undo_redo,
 		parent_node.add_child(mesh_instance)
 	
 	var mat = ShaderMaterial.new()
-	var shader = Shader.new()
+	var shader: Shader = null # aus dem gemeinsamen Vorrat (gfx_parser.gd shared_shader), unten
 	
 	# ====================================================
 	# RENDER MODE, DESTBLEND & PRIORITY
 	# ====================================================
 	var render_blend_mode = "blend_mix"
-	var priority_val = 0
 	
 	var dest_blend_val = null
 	if parsed_data.has("DestBlend"):
@@ -177,11 +176,6 @@ func _create_sprite_with_shader(parent_node: Node3D, root_node: Node, undo_redo,
 	elif dest_blend_val == "6":
 		render_blend_mode = "blend_mix"
 		
-	if parsed_data.has("Priority"):
-		priority_val = int(parsed_data["Priority"])
-	elif parsed_data.has("MainParameters") and typeof(parsed_data["MainParameters"]) == TYPE_DICTIONARY:
-		if parsed_data["MainParameters"].has("Priority"):
-			priority_val = int(parsed_data["MainParameters"]["Priority"])
 
 	var has_warp = false
 	var warp_active = false
@@ -214,7 +208,7 @@ func _create_sprite_with_shader(parent_node: Node3D, root_node: Node, undo_redo,
 	shader_code += ";\n\n"
 	
 	if has_warp:
-		shader_code += "uniform sampler2D screen_texture : hint_screen_texture, filter_linear_mipmap;\n"
+		shader_code += preload("gfx_parser.gd").WARP_UNIFORM
 
 	shader_code += "varying float v_current_time;\n\n"
 	
@@ -652,6 +646,12 @@ func _create_sprite_with_shader(parent_node: Node3D, root_node: Node, undo_redo,
 	shader_code += "\tout_rot = out_rot * mat3(vec3(cz, sz, 0.0), vec3(-sz, cz, 0.0), vec3(0.0, 0.0, 1.0));\n"
 	shader_code += "}\n\n"
 	
+	# Bind 0 (A3DTrail mit Weltpositionen): Lage-Geschichte der GFX (gfx_parser.gd trail_code, gfx_world_trail.gd)
+	var p_bind = parsed_data.get("MainParameters", {}) if typeof(parsed_data.get("MainParameters")) == TYPE_DICTIONARY else {}
+	var trail_world = str(parsed_data.get("Bind", p_bind.get("Bind", "1"))).strip_edges() == "0"
+	if trail_world:
+		shader_code += preload("gfx_parser.gd").trail_code()
+
 	# ====================================================
 	# VERTEX SHADER - TRAIL RENDERING
 	# ====================================================
@@ -751,6 +751,11 @@ func _create_sprite_with_shader(parent_node: Node3D, root_node: Node, undo_redo,
 	
 	if has_kp0_scale:
 		shader_code += "\tVERTEX *= KP_0_Scale;\n"
+	if trail_world:
+		shader_code += "\t// Bind 0: jeder Querschnitt dort, wo das Element zu seiner Geburtszeit war (Bogen hinter der Klinge, B10)\n"
+		shader_code += "\tfloat trail_age = max(0.0, (v_current_time - LocalStartTime) * 0.001 - eval_t_local);\n"
+		shader_code += "\tvec3 tr_off; vec4 tr_rot = trail_at(trail_age, tr_off);\n"
+		shader_code += "\tVERTEX = trail_qrot(tr_rot, VERTEX) + tr_off;\n"
 
 	shader_code += "\tv_base_color = c_col;\n"
 	shader_code += "}\n\n"
@@ -789,7 +794,6 @@ func _create_sprite_with_shader(parent_node: Node3D, root_node: Node, undo_redo,
 	
 	var p_main = parsed_data.get("MainParameters", {}) if typeof(parsed_data.get("MainParameters")) == TYPE_DICTIONARY else {}
 	
-	if parsed_data.has("UVExchg") or p_main.has("UVExchg"): shader_code += "\tif (UVExchg) final_uv = final_uv.yx;\n"
 	if parsed_data.has("UReverse") or p_main.has("UReverse"): shader_code += "\tif (UReverse) final_uv.x = 1.0 - final_uv.x;\n"
 	if parsed_data.has("VReverse") or p_main.has("VReverse"): shader_code += "\tif (VReverse) final_uv.y = 1.0 - final_uv.y;\n"
 		
@@ -828,18 +832,23 @@ func _create_sprite_with_shader(parent_node: Node3D, root_node: Node, undo_redo,
 		shader_code += "\t\t\tfinal_uv.y = (final_uv.y / f_rows) + (frame_y / f_rows);\n"
 		shader_code += "\t\t}\n\t}\n"
 
+	# UVExchg erst nach Umkehr und Bild der Folge (A3DTrail::FillVertexBuffer: uS / uE und v im Feld, dann gfx_swap)
+	if parsed_data.has("UVExchg") or p_main.has("UVExchg"): shader_code += "\tif (UVExchg) final_uv = final_uv.yx;\n"
 	shader_code += "\n\tvec4 tex_color = texture(TexFile, final_uv);\n"
 	
-	#// --- STANDARD FARBAUSGABE (Warp komplett ignoriert) ---
-	shader_code += "\ttex_color *= v_base_color;\n"
-	if render_blend_mode == "blend_mix": 
-		shader_code += "\ttex_color.a *= 0.70;\n"
-	shader_code += "\tALBEDO = tex_color.rgb;\n"
-	shader_code += "\tALPHA = tex_color.a * mask;\n"
+	if warp_active: # Warp wie das Original (gfx_parser.gd warp_fragment) - vorher als Farbe gezeichnet
+		shader_code += preload("gfx_parser.gd").warp_fragment("tex_color", "v_base_color.a * mask")
+	else:
+		#// --- STANDARD FARBAUSGABE ---
+		shader_code += "\ttex_color *= v_base_color;\n"
+		if render_blend_mode == "blend_mix":
+			shader_code += "\ttex_color.a *= 0.70;\n"
+		shader_code += "\tALBEDO = tex_color.rgb;\n"
+		shader_code += "\tALPHA = tex_color.a * mask;\n"
 		
 	shader_code += "}\n"
 		
-	shader.code = preload("gfx_parser.gd").add_gfx_alpha(shader_code)
+	shader = preload("gfx_parser.gd").shared_shader(preload("gfx_parser.gd").add_gfx_alpha(shader_code))
 	mat.shader = shader
 	
 	for uniform_name in uniform_assignments.keys():
@@ -854,7 +863,9 @@ func _create_sprite_with_shader(parent_node: Node3D, root_node: Node, undo_redo,
 				else: mat.set_shader_parameter(uniform_name, val)
 			else: mat.set_shader_parameter(uniform_name, val)
 	
-	mat.render_priority = priority_val
+	mat.render_priority = preload("gfx_parser.gd").element_priority(parent_node, parsed_data) # Reihenfolge in der Datei, nicht Priority
+	if warp_active: # Warp zuerst, die übrigen GFX darüber (gfx_parser.gd warp_fragment)
+		mat.render_priority = preload("gfx_parser.gd").WARP_PRIORITY
 	mesh_instance.material_override = mat
 	
 	var sprite_index = 0
