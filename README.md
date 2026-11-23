@@ -195,7 +195,8 @@ an editor plugin that reads the original game data, plus a playable client/serve
 1. Install **Godot 4.7** and the SQLite GDExtension
    [sqlite3.gd](https://github.com/Yeicor/sqlite3.gd) into `addons/sqlite3.gd/`.
 2. Copy your original *Forsaken World* client into `Stock-PWE-Client/` (the `.pck` files stay packed),
-   and your server files into `Stock-PWE-Server/` (both folders are ignored by Godot and git).
+   and your server files into `Stock-PWE-Server/` (both folders are ignored by Godot and git;
+   see *Folder structure* at the end).
 3. Open the project. The **PWE-Manager** docks appear in the editor: import a map (e.g. the starting map `s9`)
    with the ECM-GFX-MAP dock.
 4. The game server needs data tables (`addons/PWE-Manager/Server/*.json`) that are generated from your own
@@ -223,7 +224,55 @@ Work in progress, see *Patch Notes* and *Future Plans* at the top.
 
 <img width="1920" height="1040" alt="Editor overview" src="https://github.com/user-attachments/assets/219eba5d-c5c7-43c4-b38d-44e000333331" />
 
-<img width="895" height="519" alt="UI dialog (XML) view" src="https://github.com/user-attachments/assets/6ee0b583-80fb-4f85-ad94-bb1756ebe38c" />
+## Folder structure
+
+Where your own game files go (folders only). Both `Stock-` folders are ignored by Godot and git.
+`Deu/`, `Eng/` and `Franz/` hold the unpacked language files of the German, English and French client.
+
+```text
+<Godot project>/
+├── addons/
+│   ├── PWE-Manager/              this plugin
+│   └── sqlite3.gd/               SQLite GDExtension
+├── game/
+├── Stock-PWE-Client/             original client, unchanged
+│   ├── data/
+│   ├── font/
+│   ├── maps/
+│   │   └── s9/  s31/  …          one folder per map
+│   ├── music/
+│   ├── resources/                the .pck files, kept packed
+│   ├── Deu/                      German
+│   │   ├── data/                 elements.data, path.data, tasks.data
+│   │   ├── interfaces/
+│   │   ├── script/
+│   │   │   ├── config/
+│   │   │   ├── interfaces/
+│   │   │   ├── item/
+│   │   │   ├── itemdes/
+│   │   │   ├── itemdesc/
+│   │   │   ├── skill/
+│   │   │   └── skillstr/
+│   │   └── surfaces/
+│   │       └── icon/  iconset/  login/  window/  …   all UI image folders
+│   ├── Eng/                      English (no data/ folder yet)
+│   │   ├── interfaces/
+│   │   ├── script/               same subfolders as Deu
+│   │   └── surfaces/             same subfolders as Deu
+│   └── Franz/                    French
+│       ├── data/
+│       ├── interfaces/
+│       ├── script/               same subfolders as Deu
+│       └── surfaces/             same subfolders as Deu
+└── Stock-PWE-Server/             original server files, unchanged
+    └── server-fw/
+        └── gamed/
+            └── config/           elements.data, aipolicy.data
+                └── a01/  s9/  …  one folder per map
+                    ├── airmap/
+                    ├── map/
+                    └── movemap/
+```
 
 ## Disclaimer
 
